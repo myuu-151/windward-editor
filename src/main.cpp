@@ -2207,7 +2207,7 @@ int main(int argc, char** argv)
     // Link-scale reference dummy (0.55 units = his client height / 2)
     GLuint dummyProg = make_program(DUMMY_VS, DUMMY_FS);
     GLuint dummyVao = 0, dummyVbo = 0;
-    int dummyVerts = 0;
+    int dummyVerts = 0, dummyMarkerVerts = 0;
     {
         std::vector<float> dv;
         auto box = [&dv](float x0, float y0, float z0, float x1, float y1,
@@ -2238,6 +2238,9 @@ int main(int argc, char** argv)
         box(-0.08f, H * 0.88f, -0.065f, 0.08f, H, 0.065f,
             0.25f, 0.62f, 0.28f);           // cap
         dummyVerts = (int)dv.size() / 6;
+        // marker pole (drawn separately) so a 0.55u figure is findable
+        box(-0.02f, H, -0.02f, 0.02f, H + 6.0f, 0.02f, 1.0f, 0.3f, 0.8f);
+        dummyMarkerVerts = (int)dv.size() / 6 - dummyVerts;
         glGenVertexArrays(1, &dummyVao);
         glGenBuffers(1, &dummyVbo);
         glBindVertexArray(dummyVao);
@@ -2311,6 +2314,7 @@ int main(int argc, char** argv)
     bool showGrass = true;
     bool shadowsOn = true;
     bool showDummy = false;             // Link-scale reference figure
+    bool dummyMarker = true;            // tall pole so he is findable
     float dummyPos[2] = { 0.0f, 0.0f }; // placed with the brush cursor
     float grassShadowDark = 0.55f;   // blade brightness inside shadow
     float groundAO = 0.0f;           // contact AO strength under blades
@@ -2865,6 +2869,9 @@ int main(int argc, char** argv)
             glUniform3fv(glGetUniformLocation(dummyProg, "uPos"), 1, dp);
             glBindVertexArray(dummyVao);
             glDrawArrays(GL_TRIANGLES, 0, dummyVerts);
+            if (dummyMarker) {
+                glDrawArrays(GL_TRIANGLES, dummyVerts, dummyMarkerVerts);
+            }
         }
 
         // ocean plane at the waterline
@@ -3056,14 +3063,28 @@ int main(int argc, char** argv)
                     ImGui::SliderFloat("Island Bulge", &islandBulge,
                                        0.0f, 1.0f, "%.2f");
                     ImGui::SeparatorText("Scale Reference");
-                    ImGui::Checkbox("Link Dummy", &showDummy);
+                    if (ImGui::Checkbox("Link Dummy", &showDummy) &&
+                        showDummy) {
+                        // drop him where you are looking, else at the
+                        // camera's ground position (he is small: 0.55u)
+                        if (hasHit) {
+                            dummyPos[0] = hit[0];
+                            dummyPos[1] = hit[2];
+                        } else {
+                            dummyPos[0] = SDL_clamp(camPos[0], -TER_HALF,
+                                                    TER_HALF);
+                            dummyPos[1] = SDL_clamp(camPos[2], -TER_HALF,
+                                                    TER_HALF);
+                        }
+                    }
                     if (showDummy) {
-                        ImGui::TextDisabled("Link's height in game "
-                                            "(2x world scale)");
+                        ImGui::TextDisabled("0.55u tall = Link in game");
                         if (ImGui::Button("Move to Cursor") && hasHit) {
                             dummyPos[0] = hit[0];
                             dummyPos[1] = hit[2];
                         }
+                        ImGui::SameLine();
+                        ImGui::Checkbox("Marker", &dummyMarker);
                     }
                     ImGui::EndTabItem();
                 }
