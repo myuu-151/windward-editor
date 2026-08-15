@@ -30,6 +30,7 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // world extent: the ground is 2*TER_HALF on a side
@@ -254,6 +255,44 @@ void main() {
 }
 )";
 
+static const char* PROP_VS = R"(#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNorm;
+layout(location = 2) in vec2 aUv;
+uniform mat4 uMvp;
+uniform mat4 uModel;
+out vec3 vNorm;
+out vec2 vUv;
+void main() {
+    vec4 world = uModel * vec4(aPos, 1.0);
+    vNorm = mat3(uModel) * aNorm;
+    vUv = aUv;
+    gl_Position = uMvp * world;
+}
+)";
+
+static const char* PROP_FS = R"(#version 330 core
+in vec3 vNorm;
+in vec2 vUv;
+out vec4 fragColor;
+uniform sampler2D uTex;
+uniform vec3 uKd;
+uniform int uHasTex;
+void main() {
+    vec4 t = uHasTex == 1 ? texture(uTex, vUv) : vec4(1.0);
+    if (t.a < 0.5)
+        discard;
+    vec3 col = t.rgb * uKd;
+    vec3 L = normalize(vec3(0.35, 0.8, -0.45));
+    vec3 n = normalize(vNorm);
+    float diff = max(dot(n, L), 0.0);
+    // double-sided: leaves faces flip freely
+    diff = max(diff, max(dot(-n, L), 0.0) * 0.8);
+    col *= 0.68 + 0.42 * diff;
+    fragColor = vec4(col, 1.0);
+}
+)";
+
 // procedural sky (flat-white cloud variant, same as sky/water demos)
 static const char* SKY_VS = R"(#version 330 core
 const vec2 verts[3] = vec2[3](vec2(-1,-1), vec2(3,-1), vec2(-1,3));
@@ -418,6 +457,18 @@ static Mat4 view_matrix(const Mat4& camRot, float px, float py, float pz)
     return v;
 }
 
+static Mat4 model_trs(float x, float y, float z, float yaw, float s)
+{
+    float c = cosf(yaw), sn = sinf(yaw);
+    Mat4 r{};
+    r.m[0] = c * s;   r.m[2] = -sn * s;
+    r.m[5] = s;
+    r.m[8] = sn * s;  r.m[10] = c * s;
+    r.m[12] = x; r.m[13] = y; r.m[14] = z;
+    r.m[15] = 1.0f;
+    return r;
+}
+
 static void save_screenshot(SDL_Window* win, const char* path)
 {
     int w = 0, h = 0;
@@ -444,6 +495,13 @@ static std::vector<Uint8>   gKill(MASK_N* MASK_N, 255); // 255 = no blades;
 static GLuint gHeightTex = 0, gMaskTex = 0, gMask2Tex = 0, gKillTex = 0;
 static bool gHeightsDirty = true, gMaskDirty = true, gMask2Dirty = true,
             gKillDirty = true;
+
+// placed prop instances (mesh index into gPropMeshes)
+struct PropInst {
+    int mesh;
+    float x, y, z, yaw, scale;
+};
+static std::vector<PropInst> gProps;
 
 static float height_at(float x, float z)
 {
@@ -523,6 +581,7 @@ static float gTerraceStep = 2.0f;
 struct Snapshot {
     std::vector<float> h;
     std::vector<Uint8> m, m2, k;
+    std::vector<PropInst> p;
 };
 static std::vector<Snapshot> gUndoStack, gRedoStack;
 
@@ -533,7 +592,7 @@ static void mark_all_dirty()
 
 static void push_undo()
 {
-    gUndoStack.push_back({ gHeights, gMask, gMask2, gKill });
+    gUndoStack.push_back({ gHeights, gMask, gMask2, gKill, gProps });
     if (gUndoStack.size() > 32)
         gUndoStack.erase(gUndoStack.begin());
     gRedoStack.clear();
@@ -543,9 +602,9 @@ static void do_undo()
 {
     if (gUndoStack.empty())
         return;
-    gRedoStack.push_back({ gHeights, gMask, gMask2, gKill });
+    gRedoStack.push_back({ gHeights, gMask, gMask2, gKill, gProps });
     const Snapshot& s = gUndoStack.back();
-    gHeights = s.h; gMask = s.m; gMask2 = s.m2; gKill = s.k;
+    gHeights = s.h; gMask = s.m; gMask2 = s.m2; gKill = s.k; gProps = s.p;
     gUndoStack.pop_back();
     mark_all_dirty();
 }
@@ -554,9 +613,9 @@ static void do_redo()
 {
     if (gRedoStack.empty())
         return;
-    gUndoStack.push_back({ gHeights, gMask, gMask2, gKill });
+    gUndoStack.push_back({ gHeights, gMask, gMask2, gKill, gProps });
     const Snapshot& s = gRedoStack.back();
-    gHeights = s.h; gMask = s.m; gMask2 = s.m2; gKill = s.k;
+    gHeights = s.h; gMask = s.m; gMask2 = s.m2; gKill = s.k; gProps = s.p;
     gRedoStack.pop_back();
     mark_all_dirty();
 }
@@ -789,6 +848,219 @@ static void update_stamp_thumbnails()
     }
 }
 
+// ------------------------------------------------------------------ props
+// OBJ/MTL prop library (exported from the So Stylized Unity pack),
+// lazy-loaded per mesh; instances live in the map.
+
+struct PropMaterial {
+    unsigned tex = 0;
+    float kd[3] = { 1, 1, 1 };
+};
+struct PropSubmesh {
+    int first = 0, count = 0, mat = 0;
+};
+struct PropMesh {
+    std::string label;
+    std::string category;
+    std::string objPath;
+    bool loaded = false, failed = false;
+    unsigned vao = 0, vbo = 0;
+    std::vector<PropSubmesh> subs;
+    std::vector<PropMaterial> mats;
+    float boundR = 1.0f, boundH = 1.0f;
+};
+struct PropCategory {
+    std::string name;
+    std::vector<int> meshes;
+};
+static std::vector<PropMesh> gPropMeshes;
+static std::vector<PropCategory> gPropCats;
+static std::unordered_map<std::string, unsigned> gPropTexCache;
+static std::string gPropsDir;
+
+// RGBA BMP -> texture (32-bit BMPs keep their alpha for leaf cutouts)
+static unsigned load_bmp_texture_rgba(const char* path)
+{
+    SDL_Surface* raw = SDL_LoadBMP(path);
+    if (!raw)
+        return 0;
+    SDL_Surface* s = SDL_ConvertSurface(raw, SDL_PIXELFORMAT_RGBA32);
+    SDL_DestroySurface(raw);
+    if (!s)
+        return 0;
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, s->w, s->h, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, s->pixels);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    SDL_DestroySurface(s);
+    return tex;
+}
+
+static unsigned prop_texture(const std::string& file)
+{
+    auto it = gPropTexCache.find(file);
+    if (it != gPropTexCache.end())
+        return it->second;
+    std::string full = gPropsDir + "/" + file;
+    unsigned tex = load_bmp_texture_rgba(full.c_str());
+    gPropTexCache[file] = tex;
+    return tex;
+}
+
+static void load_prop_mtl(PropMesh& m, const std::string& path,
+                          std::unordered_map<std::string, int>& matIndex)
+{
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f)
+        return;
+    char line[512];
+    while (fgets(line, sizeof line, f)) {
+        char name[256];
+        float r, g, b;
+        if (sscanf(line, "newmtl %255s", name) == 1) {
+            matIndex[name] = (int)m.mats.size();
+            m.mats.push_back({});
+        } else if (!m.mats.empty() &&
+                   sscanf(line, "Kd %f %f %f", &r, &g, &b) == 3) {
+            m.mats.back().kd[0] = r;
+            m.mats.back().kd[1] = g;
+            m.mats.back().kd[2] = b;
+        } else if (!m.mats.empty() &&
+                   sscanf(line, "map_Kd %255s", name) == 1) {
+            m.mats.back().tex = prop_texture(name);
+        }
+    }
+    fclose(f);
+}
+
+static bool load_prop(int idx)
+{
+    PropMesh& m = gPropMeshes[idx];
+    if (m.loaded || m.failed)
+        return m.loaded;
+    FILE* f = fopen(m.objPath.c_str(), "rb");
+    if (!f) {
+        m.failed = true;
+        return false;
+    }
+    std::vector<float> vs, ns, ts;
+    std::vector<float> data;   // interleaved pos3 norm3 uv2
+    std::unordered_map<std::string, int> matIndex;
+    int curMat = 0;
+    char line[512];
+    while (fgets(line, sizeof line, f)) {
+        float a, b, c;
+        char name[256];
+        if (sscanf(line, "v %f %f %f", &a, &b, &c) == 3) {
+            vs.insert(vs.end(), { a, b, c });
+        } else if (sscanf(line, "vn %f %f %f", &a, &b, &c) == 3) {
+            ns.insert(ns.end(), { a, b, c });
+        } else if (sscanf(line, "vt %f %f", &a, &b) == 2) {
+            ts.insert(ts.end(), { a, b });
+        } else if (sscanf(line, "mtllib %255s", name) == 1) {
+            std::string dir = m.objPath.substr(0, m.objPath.find_last_of("/\\") + 1);
+            load_prop_mtl(m, dir + name, matIndex);
+        } else if (sscanf(line, "usemtl %255s", name) == 1) {
+            auto it = matIndex.find(name);
+            curMat = it != matIndex.end() ? it->second : 0;
+            if (m.subs.empty() || m.subs.back().count > 0)
+                m.subs.push_back({ (int)(data.size() / 8), 0, curMat });
+            else
+                m.subs.back().mat = curMat;
+        } else if (line[0] == 'f' && line[1] == ' ') {
+            int vi[3] = { 0, 0, 0 };
+            if (sscanf(line, "f %d/%*d/%*d %d/%*d/%*d %d/%*d/%*d",
+                       &vi[0], &vi[1], &vi[2]) == 3) {
+                if (m.subs.empty())
+                    m.subs.push_back({ 0, 0, 0 });
+                for (int k = 0; k < 3; k++) {
+                    int i = vi[k] - 1;
+                    float px = vs[i * 3], py = vs[i * 3 + 1], pz = vs[i * 3 + 2];
+                    data.insert(data.end(), { px, py, pz });
+                    if ((size_t)(i * 3 + 2) < ns.size())
+                        data.insert(data.end(),
+                                    { ns[i * 3], ns[i * 3 + 1], ns[i * 3 + 2] });
+                    else
+                        data.insert(data.end(), { 0, 1, 0 });
+                    if ((size_t)(i * 2 + 1) < ts.size())
+                        data.insert(data.end(), { ts[i * 2], ts[i * 2 + 1] });
+                    else
+                        data.insert(data.end(), { 0, 0 });
+                    float r = sqrtf(px * px + pz * pz);
+                    m.boundR = SDL_max(m.boundR, r);
+                    m.boundH = SDL_max(m.boundH, py);
+                }
+                m.subs.back().count += 3;
+            }
+        }
+    }
+    fclose(f);
+    if (data.empty()) {
+        m.failed = true;
+        return false;
+    }
+    if (m.mats.empty())
+        m.mats.push_back({});
+    glGenVertexArrays(1, &m.vao);
+    glGenBuffers(1, &m.vbo);
+    glBindVertexArray(m.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, m.vbo);
+    glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), data.data(),
+                 GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float),
+                          (void*)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float),
+                          (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float),
+                          (void*)(6 * sizeof(float)));
+    glBindVertexArray(0);
+    m.loaded = true;
+    return true;
+}
+
+static void scan_props(const std::string& dir)
+{
+    namespace fs = std::filesystem;
+    gPropsDir = dir;
+    std::error_code ec;
+    std::vector<std::string> cats;
+    for (const auto& e : fs::directory_iterator(dir, ec))
+        if (e.is_directory() && e.path().filename() != "textures")
+            cats.push_back(e.path().filename().string());
+    std::sort(cats.begin(), cats.end());
+    for (const std::string& c : cats) {
+        PropCategory cat;
+        cat.name = c;
+        std::vector<fs::path> objs;
+        for (const auto& e : fs::directory_iterator(dir + "/" + c, ec))
+            if (e.path().extension() == ".obj")
+                objs.push_back(e.path());
+        std::sort(objs.begin(), objs.end());
+        for (const auto& p : objs) {
+            PropMesh m;
+            m.label = p.stem().string();
+            m.category = c;
+            m.objPath = p.string();
+            cat.meshes.push_back((int)gPropMeshes.size());
+            gPropMeshes.push_back(m);
+        }
+        if (!cat.meshes.empty())
+            gPropCats.push_back(cat);
+    }
+    SDL_Log("props: %d meshes in %d categories",
+            (int)gPropMeshes.size(), (int)gPropCats.size());
+}
+
 // grayscale BMPs in assets/brushes/ become stamps too (e.g. the real
 // Unity built-in brushes exported from the editor)
 static void load_stamp_files(const char* dir)
@@ -985,12 +1257,24 @@ static void save_map(const char* path)
         SDL_Log("save failed: %s", path);
         return;
     }
-    const char magic[8] = { 'T','E','R','M','A','P','0','3' };
+    const char magic[8] = { 'T','E','R','M','A','P','0','4' };
     fwrite(magic, 1, 8, f);
     fwrite(gHeights.data(), sizeof(float), gHeights.size(), f);
     fwrite(gMask.data(), 1, gMask.size(), f);
     fwrite(gKill.data(), 1, gKill.size(), f);
     fwrite(gMask2.data(), 1, gMask2.size(), f);
+    // props: identified by "category/label" so mesh order can change
+    Uint32 n = (Uint32)gProps.size();
+    fwrite(&n, 4, 1, f);
+    for (const PropInst& pi : gProps) {
+        std::string id = gPropMeshes[pi.mesh].category + "/" +
+                         gPropMeshes[pi.mesh].label;
+        Uint16 len = (Uint16)id.size();
+        fwrite(&len, 2, 1, f);
+        fwrite(id.data(), 1, len, f);
+        float tr[5] = { pi.x, pi.y, pi.z, pi.yaw, pi.scale };
+        fwrite(tr, sizeof(float), 5, f);
+    }
     fclose(f);
     SDL_Log("saved %s", path);
 }
@@ -1015,6 +1299,32 @@ static bool load_map(const char* path)
         fread(gMask2.data(), 1, gMask2.size(), f);
     else
         std::fill(gMask2.begin(), gMask2.end(), (Uint8)0);
+    gProps.clear();
+    if (magic[7] >= '4') {
+        Uint32 n = 0;
+        if (fread(&n, 4, 1, f) == 1) {
+            for (Uint32 i = 0; i < n; i++) {
+                Uint16 len = 0;
+                if (fread(&len, 2, 1, f) != 1)
+                    break;
+                std::string id(len, '\0');
+                fread(id.data(), 1, len, f);
+                float tr[5];
+                if (fread(tr, sizeof(float), 5, f) != 5)
+                    break;
+                int meshIdx = -1;
+                for (int mi = 0; mi < (int)gPropMeshes.size(); mi++)
+                    if (gPropMeshes[mi].category + "/" +
+                        gPropMeshes[mi].label == id) {
+                        meshIdx = mi;
+                        break;
+                    }
+                if (meshIdx >= 0)
+                    gProps.push_back({ meshIdx, tr[0], tr[1], tr[2],
+                                       tr[3], tr[4] });
+            }
+        }
+    }
     fclose(f);
     gHeightsDirty = gMaskDirty = gMask2Dirty = gKillDirty = true;
     SDL_Log("loaded %s", path);
@@ -1096,6 +1406,7 @@ int main(int argc, char** argv)
     GLuint terProg = make_program(TER_VS, TER_FS);
     GLuint grassProg = make_program(GRASS_VS, GRASS_FS);
     GLuint skyProg = make_program(SKY_VS, SKY_FS);
+    GLuint propProg = make_program(PROP_VS, PROP_FS);
     make_stamps();
 
     // asset textures live next to the exe's source tree
@@ -1130,6 +1441,7 @@ int main(int argc, char** argv)
         SDL_snprintf(brushDir, sizeof brushDir, "%sbrushes", assetsDir);
         load_stamp_files(brushDir);
         prune_square_stamps();
+        scan_props(std::string(assetsDir) + "props");
     }
 
     // terrain grid (static xz, heights come from the texture)
@@ -1246,6 +1558,18 @@ int main(int argc, char** argv)
     float paintTarget = 1.0f;
     float edgeBreak = 0.5f;
     float bladeDensity = 0.8f;
+    // prop tools
+    int activeTab = 0;          // 0 sculpt, 1 paint, 2 details, 3 props
+    int propTool = 0;           // 0 place, 1 scatter, 2 erase, 3 select
+    int propCat = 0, propSel = -1, selInst = -1;
+    float propScale = 1.0f, propScaleRand = 0.35f, propYawFixed = 0.0f;
+    float propDensity = 2.0f, propSpacing = 2.0f;
+    bool propRandomYaw = true;
+    unsigned propRng = 777u;
+    auto pRand = [&propRng]() {
+        propRng = propRng * 1664525u + 1013904223u;
+        return (propRng >> 8) * (1.0f / 16777216.0f);
+    };
     BrushMode mode = BRUSH_RAISE;
     bool showGrass = true;
     bool wasPainting = false;
@@ -1375,7 +1699,8 @@ int main(int argc, char** argv)
             if (ImGui::GetIO().WantCaptureMouse)
                 hasHit = false;   // cursor over the panel: never paint through
             bool painting = hasHit && (mb & SDL_BUTTON_LMASK) && !shotPath;
-            if (painting) {
+            bool clickEdge = painting && !wasPainting;
+            if (painting && activeTab != 3) {
                 if (!wasPainting)
                     push_undo();   // one undo step per stroke
                 // sculpt modifiers: Ctrl smooths, Alt flattens
@@ -1391,8 +1716,80 @@ int main(int argc, char** argv)
                 apply_brush(active, hit[0], hit[2], brushRadius, dt,
                             keys[SDL_SCANCODE_LSHIFT] != 0, brushStrength,
                             paintTarget);
+            } else if (activeTab == 3 && hasHit) {
+                // ---- prop tools
+                if (propTool == 0 && clickEdge && propSel >= 0 &&
+                    load_prop(propSel)) {
+                    push_undo();
+                    float yaw = propRandomYaw ? pRand() * 6.2831853f
+                                              : propYawFixed;
+                    float sc = propScale *
+                        (1.0f + (pRand() - 0.5f) * 2.0f * propScaleRand);
+                    gProps.push_back({ propSel, hit[0],
+                                       height_at(hit[0], hit[2]), hit[2],
+                                       yaw, sc });
+                    selInst = (int)gProps.size() - 1;
+                } else if (propTool == 1 && painting && propSel >= 0 &&
+                           load_prop(propSel)) {
+                    if (clickEdge)
+                        push_undo();
+                    int attempts = (int)SDL_ceilf(propDensity * dt * 12.0f);
+                    for (int a = 0; a < attempts; a++) {
+                        float ang = pRand() * 6.2831853f;
+                        float rad = sqrtf(pRand()) * brushRadius;
+                        float px = hit[0] + cosf(ang) * rad;
+                        float pz = hit[2] + sinf(ang) * rad;
+                        if (fabsf(px) > TER_HALF || fabsf(pz) > TER_HALF)
+                            continue;
+                        bool tooClose = false;
+                        for (const PropInst& pi : gProps) {
+                            float dx = pi.x - px, dz = pi.z - pz;
+                            if (dx * dx + dz * dz <
+                                propSpacing * propSpacing) {
+                                tooClose = true;
+                                break;
+                            }
+                        }
+                        if (tooClose)
+                            continue;
+                        float sc = propScale *
+                            (1.0f + (pRand() - 0.5f) * 2.0f * propScaleRand);
+                        gProps.push_back({ propSel, px, height_at(px, pz),
+                                           pz, pRand() * 6.2831853f, sc });
+                    }
+                } else if (propTool == 2 && painting) {
+                    if (clickEdge)
+                        push_undo();
+                    for (size_t pi = 0; pi < gProps.size();) {
+                        float dx = gProps[pi].x - hit[0];
+                        float dz = gProps[pi].z - hit[2];
+                        if (dx * dx + dz * dz < brushRadius * brushRadius) {
+                            gProps.erase(gProps.begin() + pi);
+                            selInst = -1;
+                        } else {
+                            pi++;
+                        }
+                    }
+                } else if (propTool == 3 && clickEdge) {
+                    selInst = -1;
+                    float best = 4.0f;   // pick radius (squared below)
+                    for (int pi = 0; pi < (int)gProps.size(); pi++) {
+                        float dx = gProps[pi].x - hit[0];
+                        float dz = gProps[pi].z - hit[2];
+                        float d2 = dx * dx + dz * dz;
+                        float r = SDL_max(1.5f,
+                            gPropMeshes[gProps[pi].mesh].boundR *
+                            gProps[pi].scale);
+                        if (d2 < r * r && d2 < best * best) {
+                            best = sqrtf(d2);
+                            selInst = pi;
+                        }
+                    }
+                }
             }
             wasPainting = painting;
+            if (selInst >= (int)gProps.size())
+                selInst = -1;
         }
 
         upload_dirty();
@@ -1447,6 +1844,39 @@ int main(int argc, char** argv)
         glUniform1f(glGetUniformLocation(terProg, "uEdgeBreak"), edgeBreak);
         glBindVertexArray(terVao);
         glDrawElements(GL_TRIANGLES, (GLsizei)idx.size(), GL_UNSIGNED_INT, nullptr);
+
+        // props
+        if (!gProps.empty()) {
+            glUseProgram(propProg);
+            glUniformMatrix4fv(glGetUniformLocation(propProg, "uMvp"), 1,
+                               GL_FALSE, mvp.m);
+            glDisable(GL_CULL_FACE);
+            glActiveTexture(GL_TEXTURE0);
+            glUniform1i(glGetUniformLocation(propProg, "uTex"), 0);
+            GLint locModel = glGetUniformLocation(propProg, "uModel");
+            GLint locKd = glGetUniformLocation(propProg, "uKd");
+            GLint locHasTex = glGetUniformLocation(propProg, "uHasTex");
+            for (int pi = 0; pi < (int)gProps.size(); pi++) {
+                const PropInst& inst = gProps[pi];
+                PropMesh& pm = gPropMeshes[inst.mesh];
+                if (!pm.loaded)
+                    continue;
+                Mat4 mdl = model_trs(inst.x, inst.y, inst.z, inst.yaw,
+                                     inst.scale);
+                glUniformMatrix4fv(locModel, 1, GL_FALSE, mdl.m);
+                glBindVertexArray(pm.vao);
+                float sel = (pi == selInst && activeTab == 3) ? 1.45f : 1.0f;
+                for (const PropSubmesh& sub : pm.subs) {
+                    const PropMaterial& mat = pm.mats[sub.mat];
+                    glUniform3f(locKd, mat.kd[0] * sel, mat.kd[1] * sel,
+                                mat.kd[2] * sel);
+                    glUniform1i(locHasTex, mat.tex ? 1 : 0);
+                    if (mat.tex)
+                        glBindTexture(GL_TEXTURE_2D, mat.tex);
+                    glDrawArrays(GL_TRIANGLES, sub.first, sub.count);
+                }
+            }
+        }
 
         // grass
         if (showGrass) {
@@ -1532,6 +1962,7 @@ int main(int argc, char** argv)
 
             if (ImGui::BeginTabBar("tools")) {
                 if (ImGui::BeginTabItem("Sculpt")) {
+                    activeTab = 0;
                     const char* tools[] = { "Raise or Lower Terrain",
                                             "Smooth Height", "Flatten",
                                             "Sharpen Edges", "Terrace" };
@@ -1562,6 +1993,7 @@ int main(int argc, char** argv)
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Paint")) {
+                    activeTab = 1;
                     ImGui::TextWrapped("Paints the selected layer onto the "
                                        "terrain.");
                     ImGui::SeparatorText("Terrain Layers");
@@ -1600,6 +2032,7 @@ int main(int argc, char** argv)
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Details")) {
+                    activeTab = 2;
                     ImGui::TextWrapped("Paint grass blades. Density and "
                                        "pattern are baked into the stroke.");
                     if (ImGui::RadioButton("Paint Blades", detailTool == 0))
@@ -1622,7 +2055,102 @@ int main(int argc, char** argv)
                                        0.1f, 3.0f, "%.1f");
                     ImGui::EndTabItem();
                 }
+                if (ImGui::BeginTabItem("Props")) {
+                    activeTab = 3;
+                    ImGui::RadioButton("Place", &propTool, 0);
+                    ImGui::SameLine();
+                    ImGui::RadioButton("Scatter", &propTool, 1);
+                    ImGui::SameLine();
+                    ImGui::RadioButton("Erase", &propTool, 2);
+                    ImGui::SameLine();
+                    ImGui::RadioButton("Select", &propTool, 3);
+                    ImGui::Separator();
+                    if (gPropCats.empty()) {
+                        ImGui::TextWrapped("No props found in assets/props/");
+                    } else {
+                        propCat = SDL_clamp(propCat, 0,
+                                            (int)gPropCats.size() - 1);
+                        if (ImGui::BeginCombo("Category",
+                                gPropCats[propCat].name.c_str())) {
+                            for (int c = 0; c < (int)gPropCats.size(); c++)
+                                if (ImGui::Selectable(
+                                        gPropCats[c].name.c_str(),
+                                        c == propCat))
+                                    propCat = c;
+                            ImGui::EndCombo();
+                        }
+                        ImGui::BeginChild("proplist",
+                            ImVec2(0, 170 * uiScale), ImGuiChildFlags_Borders);
+                        for (int mi : gPropCats[propCat].meshes) {
+                            if (ImGui::Selectable(
+                                    gPropMeshes[mi].label.c_str(),
+                                    mi == propSel))
+                                propSel = mi;
+                        }
+                        ImGui::EndChild();
+                    }
+                    if (propTool == 0) {
+                        ImGui::TextWrapped("Click the ground to place the "
+                                           "selected prop.");
+                        ImGui::SliderFloat("Scale", &propScale, 0.2f, 3.0f, "%.2f");
+                        ImGui::SliderFloat("Scale Random", &propScaleRand,
+                                           0.0f, 1.0f, "%.2f");
+                        ImGui::Checkbox("Random Rotation", &propRandomYaw);
+                        if (!propRandomYaw)
+                            ImGui::SliderAngle("Rotation", &propYawFixed,
+                                               0.0f, 360.0f);
+                    } else if (propTool == 1) {
+                        ImGui::TextWrapped("Drag to scatter props inside "
+                                           "the brush.");
+                        ImGui::SliderFloat("Density", &propDensity,
+                                           0.2f, 10.0f, "%.1f");
+                        ImGui::SliderFloat("Spacing", &propSpacing,
+                                           0.3f, 8.0f, "%.1f");
+                        ImGui::SliderFloat("Scale", &propScale, 0.2f, 3.0f, "%.2f");
+                        ImGui::SliderFloat("Scale Random", &propScaleRand,
+                                           0.0f, 1.0f, "%.2f");
+                        ImGui::SliderFloat("Brush Size", &brushRadius,
+                                           0.4f, 10.0f, "%.1f");
+                    } else if (propTool == 2) {
+                        ImGui::TextWrapped("Drag to erase props inside the "
+                                           "brush.");
+                        ImGui::SliderFloat("Brush Size", &brushRadius,
+                                           0.4f, 10.0f, "%.1f");
+                    } else if (selInst >= 0) {
+                        PropInst& si = gProps[selInst];
+                        ImGui::SeparatorText(
+                            gPropMeshes[si.mesh].label.c_str());
+                        ImGui::SliderAngle("Rotation##sel", &si.yaw,
+                                           0.0f, 360.0f);
+                        ImGui::SliderFloat("Scale##sel", &si.scale,
+                                           0.2f, 3.0f, "%.2f");
+                        float pos[2] = { si.x, si.z };
+                        if (ImGui::DragFloat2("Position", pos, 0.05f)) {
+                            si.x = SDL_clamp(pos[0], -TER_HALF, TER_HALF);
+                            si.z = SDL_clamp(pos[1], -TER_HALF, TER_HALF);
+                            si.y = height_at(si.x, si.z);
+                        }
+                        if (ImGui::Button("Delete")) {
+                            push_undo();
+                            gProps.erase(gProps.begin() + selInst);
+                            selInst = -1;
+                        }
+                        ImGui::SameLine();
+                        if (selInst >= 0 && ImGui::Button("Duplicate")) {
+                            push_undo();
+                            PropInst copy = gProps[selInst];
+                            copy.x += 1.0f;
+                            gProps.push_back(copy);
+                            selInst = (int)gProps.size() - 1;
+                        }
+                    } else {
+                        ImGui::TextWrapped("Click a prop to select it.");
+                    }
+                    ImGui::TextDisabled("%d props placed", (int)gProps.size());
+                    ImGui::EndTabItem();
+                }
                 if (ImGui::BeginTabItem("Map")) {
+                    activeTab = 4;
                     if (ImGui::Button("Save (F5)"))
                         save_map(mapPath);
                     ImGui::SameLine();

@@ -37,6 +37,7 @@
     X(PFNGLUNIFORM2FPROC, glUniform2f) \
     X(PFNGLUNIFORM2FVPROC, glUniform2fv) \
     X(PFNGLUNIFORM4FPROC, glUniform4f) \
+    X(PFNGLUNIFORM3FPROC, glUniform3f) \
     X(PFNGLUNIFORM3FVPROC, glUniform3fv) \
     X(PFNGLUNIFORM4FVPROC, glUniform4fv) \
     X(PFNGLUNIFORMMATRIX4FVPROC, glUniformMatrix4fv) \
