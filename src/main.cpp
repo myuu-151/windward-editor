@@ -67,8 +67,10 @@ in vec3 vWorld;
 in vec3 vNormal;
 out vec4 fragColor;
 uniform sampler2D uMask;
+uniform sampler2D uMask2;
 uniform sampler2D uGrassTex;
 uniform sampler2D uDirtTex;
+uniform sampler2D uDirt2Tex;
 uniform sampler2D uCliffTex;
 uniform float uHalf;
 uniform vec4  uBrush;    // xz, radius, active
@@ -109,12 +111,21 @@ void main() {
     dirt *= mix(vec3(0.86, 0.80, 0.68), vec3(1.08, 1.03, 0.92),
                 fbm(vWorld.xz * 0.21));
 
-    // noise-broken blend edge: the painted border goes ragged by itself
+    // soft dirt layer: calmer clearing material, gentler variation
+    float m2 = texture(uMask2, maskUv).r;
+    vec3 soft = texture(uDirt2Tex, vWorld.xz * 0.15).rgb;
+    soft *= mix(vec3(0.90, 0.85, 0.74), vec3(1.06, 1.02, 0.93),
+                fbm(vWorld.xz * 0.17 + 5.1));
+
+    // noise-broken blend edges: painted borders go ragged by themselves
     float n = fbm(vWorld.xz * 1.1) - 0.5;
     float edge = smoothstep(0.42, 0.58, m + n * 0.38);
+    float edge2 = smoothstep(0.42, 0.58, m2 + n * 0.38);
     vec3 col = mix(grass, dirt, edge);
+    col = mix(col, soft, edge2);
     // soft shadowed band where grass meets dirt grounds the path
-    col *= 1.0 - 0.13 * edge * (1.0 - edge) * 4.0;
+    float rim = max(edge * (1.0 - edge), edge2 * (1.0 - edge2));
+    col *= 1.0 - 0.13 * rim * 4.0;
 
     // slope-based cliff: triplanar so the rock drapes down sculpted walls
     // instead of smearing (two vertical projections blended by the normal)
@@ -149,9 +160,11 @@ layout(location = 1) in vec4 aInst;    // xz, rot, seed
 uniform mat4 uMvp;
 uniform sampler2D uHeight;
 uniform sampler2D uMask;
+uniform sampler2D uMask2;
 uniform sampler2D uKill;
 uniform float uHalf;
 uniform float uTime;
+uniform float uDensity;
 out float vV;
 out vec2  vWorldXz;
 out float vSeed;
@@ -160,12 +173,14 @@ void main() {
     vec2 xz = aInst.xy;
     vec2 uv = (xz + vec2(uHalf)) / (2.0 * uHalf);
     float ground = texture(uHeight, uv).r;
-    float m = texture(uMask, uv).r;
+    float m = max(texture(uMask, uv).r, texture(uMask2, uv).r);
 
     // no grass on dirt; per-blade threshold jitter makes a soft ragged edge
     float show = step(m, 0.30 + fract(aInst.w * 7.31) * 0.12);
-    // grass-removal brush channel
-    show *= step(texture(uKill, uv).r, 0.5);
+    // density mask (Remove Grass = 0, painted density in between) times
+    // the global blade-density setting; each blade rolls its own die
+    float dens = (1.0 - texture(uKill, uv).r) * uDensity;
+    show *= step(fract(aInst.w * 9.77), dens);
 
     // no grass on cliffs: estimate slope from the heightmap
     float eps = 2.0 * uHalf / 256.0;
@@ -403,10 +418,12 @@ static void save_screenshot(SDL_Window* win, const char* path)
 // ------------------------------------------------------------------ editor state
 
 static std::vector<float>   gHeights(HN* HN, 0.0f);
-static std::vector<Uint8>   gMask(MASK_N* MASK_N, 0);   // 0 grass .. 255 dirt
+static std::vector<Uint8>   gMask(MASK_N* MASK_N, 0);   // path dirt layer
+static std::vector<Uint8>   gMask2(MASK_N* MASK_N, 0);  // soft dirt layer
 static std::vector<Uint8>   gKill(MASK_N* MASK_N, 0);   // 255 = no blades
-static GLuint gHeightTex = 0, gMaskTex = 0, gKillTex = 0;
-static bool gHeightsDirty = true, gMaskDirty = true, gKillDirty = true;
+static GLuint gHeightTex = 0, gMaskTex = 0, gMask2Tex = 0, gKillTex = 0;
+static bool gHeightsDirty = true, gMaskDirty = true, gMask2Dirty = true,
+            gKillDirty = true;
 
 static float height_at(float x, float z)
 {
@@ -458,19 +475,20 @@ static bool ray_terrain(const float ro[3], const float rd[3], float out[3])
 }
 
 enum BrushMode { BRUSH_RAISE, BRUSH_SMOOTH, BRUSH_FLATTEN,
-                 BRUSH_DIRT, BRUSH_GRASS, BRUSH_KILLGRASS };
+                 BRUSH_DIRT, BRUSH_DIRT2, BRUSH_GRASS, BRUSH_KILLGRASS };
 
-static const float kBrushColors[6][3] = {
+static const float kBrushColors[7][3] = {
     { 1.0f, 0.85f, 0.3f },   // raise: yellow
     { 0.4f, 0.8f, 1.0f },    // smooth: blue
     { 0.9f, 0.5f, 0.9f },    // flatten: purple
-    { 0.72f, 0.5f, 0.28f },  // dirt: brown
+    { 0.72f, 0.5f, 0.28f },  // path dirt: brown
+    { 0.85f, 0.75f, 0.5f },  // soft dirt: sand
     { 0.5f, 1.0f, 0.4f },    // grass: green
     { 0.9f, 0.35f, 0.3f },   // remove grass: red
 };
-static const char* kBrushNames[6] = { "Sculpt", "Smooth", "Flatten",
-                                      "Paint Dirt", "Paint Grass",
-                                      "Remove Grass" };
+static const char* kBrushNames[7] = { "Sculpt", "Smooth", "Flatten",
+                                      "Path Dirt", "Soft Dirt",
+                                      "Paint Grass", "Remove Grass" };
 
 // flatten pulls terrain toward the height captured when the stroke began
 static float gFlattenTarget = 0.0f;
@@ -488,6 +506,44 @@ static float falloff_weight(float dOverR)
     case FALLOFF_SPHERE: return sqrtf(SDL_max(0.0f, 1.0f - dOverR * dOverR));
     case FALLOFF_TIP:    return t * t;
     default:             return t * t * (3.0f - 2.0f * t);
+    }
+}
+
+// grass brush settings: painted density and placement pattern, baked
+// into the density mask so different areas keep different patterns
+static float gGrassDensity = 1.0f;
+static int gGrassPattern = 0;
+static const char* kGrassPatterns[] = { "Uniform", "Clumps", "Speckle" };
+
+static float cpu_vnoise(float x, float y)
+{
+    auto hash = [](int ix, int iy) {
+        unsigned h = (unsigned)(ix * 374761393 + iy * 668265263);
+        h = (h ^ (h >> 13)) * 1274126177u;
+        return ((h ^ (h >> 16)) & 0xffffff) / 16777215.0f;
+    };
+    int ix = (int)floorf(x), iy = (int)floorf(y);
+    float fx = x - ix, fy = y - iy;
+    fx = fx * fx * (3.0f - 2.0f * fx);
+    fy = fy * fy * (3.0f - 2.0f * fy);
+    float a = hash(ix, iy), b = hash(ix + 1, iy);
+    float c = hash(ix, iy + 1), d = hash(ix + 1, iy + 1);
+    return a + (b - a) * fx + (c - a) * fy * (1 - fx) + (d - b) * fx * fy;
+}
+
+static float grass_pattern(float x, float z)
+{
+    switch (gGrassPattern) {
+    case 1: {   // clumps: large soft patches with bare gaps
+        float n = cpu_vnoise(x * 0.45f, z * 0.45f);
+        return SDL_clamp((n - 0.32f) / 0.30f, 0.0f, 1.0f);
+    }
+    case 2: {   // speckle: small tufts scattered on mostly-bare ground
+        float n = cpu_vnoise(x * 2.7f, z * 2.7f);
+        return n * n * n;
+    }
+    default:
+        return 1.0f;
     }
 }
 
@@ -569,16 +625,23 @@ static void apply_brush(BrushMode mode, float cx, float cz, float radius,
                     float nv = v + (target - v) * rate;
                     v = (Uint8)SDL_clamp((int)(nv + 0.5f), 0, 255);
                 };
-                if (mode == BRUSH_DIRT)
+                if (mode == BRUSH_DIRT) {
                     blend(gMask[j * MASK_N + i], 255.0f);
-                else if (mode == BRUSH_KILLGRASS)
-                    blend(gKill[j * MASK_N + i], 255.0f);
-                else {   // paint grass restores ground AND blades
+                    blend(gMask2[j * MASK_N + i], 0.0f);
+                } else if (mode == BRUSH_DIRT2) {
+                    blend(gMask2[j * MASK_N + i], 255.0f);
                     blend(gMask[j * MASK_N + i], 0.0f);
-                    blend(gKill[j * MASK_N + i], 0.0f);
+                } else if (mode == BRUSH_KILLGRASS) {
+                    blend(gKill[j * MASK_N + i], 255.0f);
+                } else {   // paint grass: restore ground, blades at the
+                           // chosen density shaped by the chosen pattern
+                    blend(gMask[j * MASK_N + i], 0.0f);
+                    blend(gMask2[j * MASK_N + i], 0.0f);
+                    float dens = gGrassDensity * grass_pattern(x, z);
+                    blend(gKill[j * MASK_N + i], (1.0f - dens) * 255.0f);
                 }
             }
-        gMaskDirty = gKillDirty = true;
+        gMaskDirty = gMask2Dirty = gKillDirty = true;
     }
 }
 
@@ -598,6 +661,13 @@ static void upload_dirty()
                      GL_UNSIGNED_BYTE, gMask.data());
         gMaskDirty = false;
     }
+    if (gMask2Dirty) {
+        glBindTexture(GL_TEXTURE_2D, gMask2Tex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, MASK_N, MASK_N, 0, GL_RED,
+                     GL_UNSIGNED_BYTE, gMask2.data());
+        gMask2Dirty = false;
+    }
     if (gKillDirty) {
         glBindTexture(GL_TEXTURE_2D, gKillTex);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -614,11 +684,12 @@ static void save_map(const char* path)
         SDL_Log("save failed: %s", path);
         return;
     }
-    const char magic[8] = { 'T','E','R','M','A','P','0','2' };
+    const char magic[8] = { 'T','E','R','M','A','P','0','3' };
     fwrite(magic, 1, 8, f);
     fwrite(gHeights.data(), sizeof(float), gHeights.size(), f);
     fwrite(gMask.data(), 1, gMask.size(), f);
     fwrite(gKill.data(), 1, gKill.size(), f);
+    fwrite(gMask2.data(), 1, gMask2.size(), f);
     fclose(f);
     SDL_Log("saved %s", path);
 }
@@ -639,8 +710,12 @@ static bool load_map(const char* path)
         fread(gKill.data(), 1, gKill.size(), f);
     else
         std::fill(gKill.begin(), gKill.end(), (Uint8)0);
+    if (magic[7] >= '3')
+        fread(gMask2.data(), 1, gMask2.size(), f);
+    else
+        std::fill(gMask2.begin(), gMask2.end(), (Uint8)0);
     fclose(f);
-    gHeightsDirty = gMaskDirty = gKillDirty = true;
+    gHeightsDirty = gMaskDirty = gMask2Dirty = gKillDirty = true;
     SDL_Log("loaded %s", path);
     return true;
 }
@@ -719,7 +794,7 @@ int main(int argc, char** argv)
     // walk up from build dirs to terrain\ if needed: try a few candidates
     const char* candidates[] = { "assets/", "../assets/", "../../assets/",
                                  "../../../assets/" };
-    GLuint grassTex = 0, dirtTex = 0, cliffTex = 0;
+    GLuint grassTex = 0, dirtTex = 0, dirt2Tex = 0, cliffTex = 0;
     for (const char* c : candidates) {
         char p[600];
         SDL_snprintf(p, sizeof p, "%s%sgrass.bmp", base, c);
@@ -727,13 +802,15 @@ int main(int argc, char** argv)
         if (grassTex) {
             SDL_snprintf(p, sizeof p, "%s%sdirt.bmp", base, c);
             dirtTex = load_bmp_texture(p);
+            SDL_snprintf(p, sizeof p, "%s%sdirt2.bmp", base, c);
+            dirt2Tex = load_bmp_texture(p);
             SDL_snprintf(p, sizeof p, "%s%scliff.bmp", base, c);
             cliffTex = load_bmp_texture(p);
             break;
         }
     }
-    if (!grassTex || !dirtTex || !cliffTex) {
-        SDL_Log("could not find assets/grass|dirt|cliff.bmp near exe");
+    if (!grassTex || !dirtTex || !dirt2Tex || !cliffTex) {
+        SDL_Log("could not find assets/grass|dirt|dirt2|cliff.bmp near exe");
         return 1;
     }
 
@@ -779,6 +856,12 @@ int main(int argc, char** argv)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glGenTextures(1, &gMaskTex);
     glBindTexture(GL_TEXTURE_2D, gMaskTex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glGenTextures(1, &gMask2Tex);
+    glBindTexture(GL_TEXTURE_2D, gMask2Tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -842,6 +925,7 @@ int main(int argc, char** argv)
     float camPos[3] = { 0.0f, 12.0f, 30.0f };
     float brushRadius = 2.5f;
     float brushStrength = 1.0f;
+    float bladeDensity = 0.8f;
     BrushMode mode = BRUSH_RAISE;
     bool showGrass = true;
     bool wasPainting = false;
@@ -1007,6 +1091,12 @@ int main(int argc, char** argv)
         glActiveTexture(GL_TEXTURE4);
         glBindTexture(GL_TEXTURE_2D, cliffTex);
         glUniform1i(glGetUniformLocation(terProg, "uCliffTex"), 4);
+        glActiveTexture(GL_TEXTURE5);
+        glBindTexture(GL_TEXTURE_2D, gMask2Tex);
+        glUniform1i(glGetUniformLocation(terProg, "uMask2"), 5);
+        glActiveTexture(GL_TEXTURE6);
+        glBindTexture(GL_TEXTURE_2D, dirt2Tex);
+        glUniform1i(glGetUniformLocation(terProg, "uDirt2Tex"), 6);
         float brushU[4] = { hit[0], hit[2], brushRadius, hasHit && !shotPath ? 1.0f : 0.0f };
         glUniform4fv(glGetUniformLocation(terProg, "uBrush"), 1, brushU);
         glUniform3fv(glGetUniformLocation(terProg, "uBrushCol"), 1,
@@ -1020,6 +1110,7 @@ int main(int argc, char** argv)
             glUniformMatrix4fv(glGetUniformLocation(grassProg, "uMvp"), 1, GL_FALSE, mvp.m);
             glUniform1f(glGetUniformLocation(grassProg, "uHalf"), TER_HALF);
             glUniform1f(glGetUniformLocation(grassProg, "uTime"), (float)simTime);
+            glUniform1f(glGetUniformLocation(grassProg, "uDensity"), bladeDensity);
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, gHeightTex);
             glUniform1i(glGetUniformLocation(grassProg, "uHeight"), 0);
@@ -1032,6 +1123,9 @@ int main(int argc, char** argv)
             glActiveTexture(GL_TEXTURE3);
             glBindTexture(GL_TEXTURE_2D, gKillTex);
             glUniform1i(glGetUniformLocation(grassProg, "uKill"), 3);
+            glActiveTexture(GL_TEXTURE4);
+            glBindTexture(GL_TEXTURE_2D, gMask2Tex);
+            glUniform1i(glGetUniformLocation(grassProg, "uMask2"), 4);
             glDisable(GL_CULL_FACE);
             glBindVertexArray(grassVao);
             glDrawArraysInstanced(GL_TRIANGLES, 0, 12, instCount);
@@ -1082,9 +1176,15 @@ int main(int argc, char** argv)
             ImGui::SliderFloat("Strength", &brushStrength, 0.1f, 3.0f, "%.1f");
             ImGui::Combo("Shape", &gShape, kShapeNames, 3);
             ImGui::Combo("Falloff", &gFalloff, kFalloffNames, 4);
+            if (mode == BRUSH_GRASS) {
+                ImGui::SeparatorText("Grass Brush");
+                ImGui::SliderFloat("Density", &gGrassDensity, 0.0f, 1.0f, "%.2f");
+                ImGui::Combo("Pattern", &gGrassPattern, kGrassPatterns, 3);
+            }
 
             ImGui::SeparatorText("View");
             ImGui::Checkbox("Grass", &showGrass);
+            ImGui::SliderFloat("Blade Density", &bladeDensity, 0.1f, 1.0f, "%.2f");
 
             ImGui::SeparatorText("Map");
             if (ImGui::Button("Save (F5)"))
