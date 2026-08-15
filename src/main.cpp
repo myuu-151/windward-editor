@@ -1450,9 +1450,14 @@ int main(int argc, char** argv)
 
         // tool panel
         if (!shotPath) {
-            ImGui::SetNextWindowPos(ImVec2(12, 12), ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSize(ImVec2(320, 0), ImGuiCond_FirstUseEver);
-            ImGui::Begin("Terrain", nullptr, ImGuiWindowFlags_NoCollapse);
+            // docked inspector: pinned to the right edge, full height
+            const float panelW = 320.0f;
+            ImGui::SetNextWindowPos(ImVec2((float)w - panelW, 0.0f));
+            ImGui::SetNextWindowSize(ImVec2(panelW, (float)h));
+            ImGui::Begin("Terrain", nullptr,
+                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+                         ImGuiWindowFlags_NoCollapse |
+                         ImGuiWindowFlags_NoBringToFrontOnFocus);
 
             static int sculptTool = 0;
             static int paintLayer = 0;
