@@ -994,6 +994,8 @@ struct PropMaterial {
     bool grayMask = false;
     float kd[3] = { 1, 1, 1 };   // top/main color
     float ka[3] = { 1, 1, 1 };   // bottom color (gradient)
+    std::string name;
+    std::string texName;
 };
 struct PropSubmesh {
     int first = 0, count = 0, mat = 0;
@@ -1083,6 +1085,7 @@ static void load_prop_mtl(PropMesh& m, const std::string& path,
         if (sscanf(line, "newmtl %255s", name) == 1) {
             matIndex[name] = (int)m.mats.size();
             m.mats.push_back({});
+            m.mats.back().name = name;
         } else if (!m.mats.empty() &&
                    sscanf(line, "Kd %f %f %f", &r, &g, &b) == 3) {
             m.mats.back().kd[0] = r;
@@ -1098,9 +1101,103 @@ static void load_prop_mtl(PropMesh& m, const std::string& path,
             PropTex pt = prop_texture(name);
             m.mats.back().tex = pt.tex;
             m.mats.back().grayMask = pt.gray;
+            m.mats.back().texName = name;
         }
     }
     fclose(f);
+}
+
+// ---- style presets: per-model, per-role (Trunk / Leaves / Other)
+// texture + gradient color overrides, persisted in props/styles.txt so
+// they survive pack re-exports
+struct StyleOverride {
+    std::string tex;             // "-" or empty = keep the MTL texture
+    float kd[3] = { 1, 1, 1 };
+    float ka[3] = { 1, 1, 1 };
+};
+static std::unordered_map<std::string, StyleOverride> gStyles; // "id|Role"
+static std::vector<std::string> gPropTexFiles;
+static const char* kRoleNames[3] = { "Trunk", "Leaves", "Other" };
+
+static int mat_role(const std::string& name)
+{
+    std::string l;
+    for (char c : name)
+        l += (char)tolower((unsigned char)c);
+    if (l.find("leaf") != std::string::npos ||
+        l.find("leaves") != std::string::npos ||
+        l.find("foliage") != std::string::npos ||
+        l.find("frond") != std::string::npos ||
+        l.find("needle") != std::string::npos ||
+        l.find("petal") != std::string::npos)
+        return 1;
+    if (l.find("bark") != std::string::npos ||
+        l.find("trunk") != std::string::npos ||
+        l.find("stem") != std::string::npos ||
+        l.find("branch") != std::string::npos ||
+        l.find("wood") != std::string::npos ||
+        l.find("root") != std::string::npos)
+        return 0;
+    return 2;
+}
+
+static std::string mesh_id(const PropMesh& m)
+{
+    return m.category + "/" + m.label;
+}
+
+static void apply_styles(PropMesh& m)
+{
+    for (PropMaterial& mat : m.mats) {
+        auto it = gStyles.find(mesh_id(m) + "|" +
+                               kRoleNames[mat_role(mat.name)]);
+        if (it == gStyles.end())
+            continue;
+        const StyleOverride& s = it->second;
+        memcpy(mat.kd, s.kd, sizeof mat.kd);
+        memcpy(mat.ka, s.ka, sizeof mat.ka);
+        if (!s.tex.empty() && s.tex != "-") {
+            PropTex pt = prop_texture("textures/" + s.tex);
+            if (pt.tex) {
+                mat.tex = pt.tex;
+                mat.grayMask = pt.gray;
+                mat.texName = "textures/" + s.tex;
+            }
+        }
+    }
+}
+
+static void save_styles()
+{
+    FILE* f = fopen((gPropsDir + "/styles.txt").c_str(), "wb");
+    if (!f)
+        return;
+    for (const auto& kv : gStyles) {
+        const StyleOverride& s = kv.second;
+        fprintf(f, "style %s %s %f %f %f %f %f %f\n", kv.first.c_str(),
+                s.tex.empty() ? "-" : s.tex.c_str(),
+                s.kd[0], s.kd[1], s.kd[2], s.ka[0], s.ka[1], s.ka[2]);
+    }
+    fclose(f);
+}
+
+static void load_styles()
+{
+    FILE* f = fopen((gPropsDir + "/styles.txt").c_str(), "rb");
+    if (!f)
+        return;
+    char line[512], key[256], tex[256];
+    while (fgets(line, sizeof line, f)) {
+        StyleOverride s;
+        if (sscanf(line, "style %255s %255s %f %f %f %f %f %f", key, tex,
+                   &s.kd[0], &s.kd[1], &s.kd[2],
+                   &s.ka[0], &s.ka[1], &s.ka[2]) == 8) {
+            s.tex = tex;
+            gStyles[key] = s;
+        }
+    }
+    fclose(f);
+    SDL_Log("loaded %d style presets", (int)gStyles.size());
 }
 
 static bool load_prop(int idx)
@@ -1178,6 +1275,7 @@ static bool load_prop(int idx)
     }
     if (m.mats.empty())
         m.mats.push_back({});
+    apply_styles(m);
     glGenVertexArrays(1, &m.vao);
     glGenBuffers(1, &m.vbo);
     glBindVertexArray(m.vao);
@@ -1230,6 +1328,11 @@ static void scan_props(const std::string& dir)
         if (!cat.meshes.empty())
             gPropCats.push_back(cat);
     }
+    for (const auto& e : fs::directory_iterator(dir + "/textures", ec))
+        if (e.path().extension() == ".bmp")
+            gPropTexFiles.push_back(e.path().filename().string());
+    std::sort(gPropTexFiles.begin(), gPropTexFiles.end());
+    load_styles();
     SDL_Log("props: %d meshes in %d categories",
             (int)gPropMeshes.size(), (int)gPropCats.size());
 }
@@ -2498,6 +2601,56 @@ int main(int argc, char** argv)
                                 propSel = mi;
                         }
                         ImGui::EndChild();
+                    }
+                    // per-model style presets by material role: swap the
+                    // Trunk / Leaves texture and gradient colors, saved to
+                    // props/styles.txt (survives pack re-exports)
+                    if (propSel >= 0 &&
+                        ImGui::CollapsingHeader("Style Presets") &&
+                        load_prop(propSel)) {
+                        PropMesh& spm = gPropMeshes[propSel];
+                        for (int role = 0; role < 3; role++) {
+                            PropMaterial* rep = nullptr;
+                            for (PropMaterial& mm : spm.mats)
+                                if (mat_role(mm.name) == role) {
+                                    rep = &mm;
+                                    break;
+                                }
+                            if (!rep)
+                                continue;
+                            ImGui::PushID(role);
+                            ImGui::SeparatorText(kRoleNames[role]);
+                            std::string cur = rep->texName;
+                            size_t slash = cur.find_last_of("/\\");
+                            if (slash != std::string::npos)
+                                cur = cur.substr(slash + 1);
+                            bool changed = false;
+                            if (ImGui::BeginCombo("Texture",
+                                    cur.empty() ? "(none)" : cur.c_str())) {
+                                for (const std::string& tf : gPropTexFiles)
+                                    if (ImGui::Selectable(tf.c_str(),
+                                                          tf == cur)) {
+                                        cur = tf;
+                                        changed = true;
+                                    }
+                                ImGui::EndCombo();
+                            }
+                            changed |= ImGui::ColorEdit3("Top", rep->kd,
+                                ImGuiColorEditFlags_NoInputs);
+                            changed |= ImGui::ColorEdit3("Bottom", rep->ka,
+                                ImGuiColorEditFlags_NoInputs);
+                            if (changed) {
+                                StyleOverride s;
+                                s.tex = cur;
+                                memcpy(s.kd, rep->kd, sizeof s.kd);
+                                memcpy(s.ka, rep->ka, sizeof s.ka);
+                                gStyles[mesh_id(spm) + "|" +
+                                        kRoleNames[role]] = s;
+                                apply_styles(spm);
+                                save_styles();
+                            }
+                            ImGui::PopID();
+                        }
                     }
                     if (propTool == 0) {
                         ImGui::TextWrapped("Click the ground to place the "
