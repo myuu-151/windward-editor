@@ -201,9 +201,13 @@ uniform sampler2D uHeight;
 uniform sampler2D uMask;
 uniform sampler2D uMask2;
 uniform sampler2D uKill;
+uniform sampler2D uShadowMap;
+uniform mat4 uLightMvp;
+uniform int uShadowsOn;
 uniform float uHalf;
 uniform float uTime;
 uniform float uDensity;
+out float vShadow;
 out float vV;
 out vec2  vWorldXz;
 out float vSeed;
@@ -250,6 +254,20 @@ void main() {
                   * aBlade.y * aBlade.y;
     p.xz += vec2(0.85, 0.53) * sway;
 
+    // one shadow probe per blade at its root: the blade inherits exactly
+    // the shadow the ground under it has, so canopy patterns flow across
+    // the grass without speckle
+    vShadow = 1.0;
+    if (uShadowsOn == 1) {
+        vec4 lc = uLightMvp * vec4(xz.x, ground, xz.y, 1.0);
+        vec3 sp = lc.xyz / lc.w * 0.5 + 0.5;
+        if (sp.x > 0.0 && sp.x < 1.0 && sp.y > 0.0 && sp.y < 1.0 &&
+            sp.z < 1.0) {
+            float d = texture(uShadowMap, sp.xy).r;
+            if (sp.z - 0.003 > d)
+                vShadow = 0.55;
+        }
+    }
     vV = aBlade.y;
     vWorldXz = xz;
     vSeed = fract(aInst.w * 11.13);
@@ -258,6 +276,7 @@ void main() {
 )";
 
 static const char* GRASS_FS = R"(#version 330 core
+in float vShadow;
 in float vV;
 in vec2  vWorldXz;
 in float vSeed;
@@ -271,7 +290,7 @@ void main() {
     vec3 groundCol = textureLod(uGrassTex, vWorldXz * 0.16, 4.5).rgb;
     vec3 root = groundCol * 0.55;
     vec3 tip  = groundCol * (1.15 + vSeed * 0.15);
-    vec3 col = mix(root, tip, vV * vV);
+    vec3 col = mix(root, tip, vV * vV) * vShadow;
     fragColor = vec4(col, 1.0);
 }
 )";
@@ -2417,6 +2436,13 @@ int main(int argc, char** argv)
             glActiveTexture(GL_TEXTURE4);
             glBindTexture(GL_TEXTURE_2D, gMask2Tex);
             glUniform1i(glGetUniformLocation(grassProg, "uMask2"), 4);
+            glActiveTexture(GL_TEXTURE5);
+            glBindTexture(GL_TEXTURE_2D, shadowTex);
+            glUniform1i(glGetUniformLocation(grassProg, "uShadowMap"), 5);
+            glUniformMatrix4fv(glGetUniformLocation(grassProg, "uLightMvp"),
+                               1, GL_FALSE, lightMvp.m);
+            glUniform1i(glGetUniformLocation(grassProg, "uShadowsOn"),
+                        shadowsOn ? 1 : 0);
             glDisable(GL_CULL_FACE);
             glBindVertexArray(grassVao);
             glDrawArraysInstanced(GL_TRIANGLES, 0, 12, instCount);
