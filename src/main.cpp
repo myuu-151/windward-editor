@@ -1782,12 +1782,63 @@ static bool load_map(const char* path)
     return true;
 }
 
+// ------------------------------------------------------------- world chart
+// WW-style sea chart: an N x N looping grid of quadrants, each optionally
+// holding an exported .wmap island. Saved as a simple text .wworld file.
+static const int WORLD_MAX = 8;
+static int gWorldSize = 7;               // Wind Waker's chart is 7x7
+static std::string gWorldCells[WORLD_MAX][WORLD_MAX];
+static int gWorldSel[2] = { 0, 0 };
+
+static void save_world(const char* path)
+{
+    FILE* f = fopen(path, "wb");
+    if (!f) {
+        SDL_Log("world save failed: %s", path);
+        return;
+    }
+    fprintf(f, "wworld 1\nsize %d\nloop 1\n", gWorldSize);
+    for (int y = 0; y < gWorldSize; y++)
+        for (int x = 0; x < gWorldSize; x++)
+            if (!gWorldCells[y][x].empty())
+                fprintf(f, "cell %d %d %s\n", x, y,
+                        gWorldCells[y][x].c_str());
+    fclose(f);
+    SDL_Log("saved world %s", path);
+}
+
+static bool load_world(const char* path)
+{
+    FILE* f = fopen(path, "rb");
+    if (!f)
+        return false;
+    for (int y = 0; y < WORLD_MAX; y++)
+        for (int x = 0; x < WORLD_MAX; x++)
+            gWorldCells[y][x].clear();
+    char line[1200];
+    while (fgets(line, sizeof line, f)) {
+        int x, y, n;
+        char p[1024];
+        if (sscanf(line, "size %d", &n) == 1)
+            gWorldSize = SDL_clamp(n, 2, WORLD_MAX);
+        else if (sscanf(line, "cell %d %d %1023[^\n]", &x, &y, p) == 3)
+            if (x >= 0 && x < WORLD_MAX && y >= 0 && y < WORLD_MAX)
+                gWorldCells[y][x] = p;
+    }
+    fclose(f);
+    SDL_Log("loaded world %s", path);
+    return true;
+}
+
 // async file-dialog plumbing (SDL may invoke the callback off-thread:
 // stash the result, act on it from the main loop)
-static volatile int gDialogAction = 0;   // 1 = save, 2 = load
+static volatile int gDialogAction = 0;   // 1..5, see handler
 static char gDialogFile[1024];
 static const SDL_DialogFileFilter kMapFilters[] = {
     { "Windward map", "wmap" },
+};
+static const SDL_DialogFileFilter kWorldFilters[] = {
+    { "Windward world", "wworld" },
 };
 
 static void SDLCALL map_dialog_cb(void* userdata,
@@ -2324,6 +2375,18 @@ int main(int argc, char** argv)
             gDialogAction = 0;
             if (load_map(gDialogFile))
                 applySettingsIn();
+        } else if (gDialogAction == 3) {
+            gDialogAction = 0;
+            gWorldCells[gWorldSel[1]][gWorldSel[0]] = gDialogFile;
+        } else if (gDialogAction == 4) {
+            gDialogAction = 0;
+            std::string p = gDialogFile;
+            if (p.size() < 7 || p.substr(p.size() - 7) != ".wworld")
+                p += ".wworld";
+            save_world(p.c_str());
+        } else if (gDialogAction == 5) {
+            gDialogAction = 0;
+            load_world(gDialogFile);
         }
 
         ImGui_ImplOpenGL3_NewFrame();
@@ -3038,6 +3101,81 @@ int main(int argc, char** argv)
                         ImGui::TextWrapped("Click a prop to select it.");
                     }
                     ImGui::TextDisabled("%d props placed", (int)gProps.size());
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("World")) {
+                    activeTab = 5;
+                    ImGui::TextWrapped("Sea chart: assign exported .wmap "
+                                       "islands to quadrants. The chart "
+                                       "loops at its edges, Wind Waker "
+                                       "style.");
+                    ImGui::SliderInt("Chart Size", &gWorldSize, 2, WORLD_MAX);
+                    ImGui::Separator();
+                    float cellPx = SDL_min(38.0f * uiScale,
+                        (ImGui::GetContentRegionAvail().x - 8.0f) /
+                        gWorldSize - 4.0f);
+                    for (int cy = 0; cy < gWorldSize; cy++) {
+                        for (int cx = 0; cx < gWorldSize; cx++) {
+                            if (cx)
+                                ImGui::SameLine();
+                            char lbl[8];
+                            SDL_snprintf(lbl, sizeof lbl, "%c%d",
+                                         'A' + cx, cy + 1);
+                            bool sel = (gWorldSel[0] == cx &&
+                                        gWorldSel[1] == cy);
+                            bool has = !gWorldCells[cy][cx].empty();
+                            ImVec4 c = has
+                                ? ImVec4(0.22f, 0.55f, 0.28f, 1.0f)
+                                : ImVec4(0.16f, 0.28f, 0.48f, 1.0f);
+                            if (sel)
+                                c = ImVec4(0.85f, 0.65f, 0.2f, 1.0f);
+                            ImGui::PushStyleColor(ImGuiCol_Button, c);
+                            ImGui::PushID(cy * WORLD_MAX + cx);
+                            if (ImGui::Button(lbl, ImVec2(cellPx, cellPx))) {
+                                gWorldSel[0] = cx;
+                                gWorldSel[1] = cy;
+                            }
+                            if (has && ImGui::IsItemHovered()) {
+                                std::string n = gWorldCells[cy][cx];
+                                size_t s = n.find_last_of("/\\");
+                                ImGui::SetTooltip("%s",
+                                    s == std::string::npos
+                                        ? n.c_str() : n.c_str() + s + 1);
+                            }
+                            ImGui::PopID();
+                            ImGui::PopStyleColor();
+                        }
+                    }
+                    ImGui::Separator();
+                    {
+                        char sl[8];
+                        SDL_snprintf(sl, sizeof sl, "%c%d",
+                                     'A' + gWorldSel[0], gWorldSel[1] + 1);
+                        std::string cur =
+                            gWorldCells[gWorldSel[1]][gWorldSel[0]];
+                        size_t s = cur.find_last_of("/\\");
+                        ImGui::Text("%s: %s", sl,
+                                    cur.empty() ? "(open sea)"
+                                    : (s == std::string::npos
+                                           ? cur.c_str()
+                                           : cur.c_str() + s + 1));
+                    }
+                    if (ImGui::Button("Assign Island..."))
+                        SDL_ShowOpenFileDialog(map_dialog_cb, (void*)3, win,
+                                               kMapFilters, 1, nullptr,
+                                               false);
+                    ImGui::SameLine();
+                    if (ImGui::Button("Clear Cell"))
+                        gWorldCells[gWorldSel[1]][gWorldSel[0]].clear();
+                    ImGui::SeparatorText("World File");
+                    if (ImGui::Button("Save World..."))
+                        SDL_ShowSaveFileDialog(map_dialog_cb, (void*)4, win,
+                                               kWorldFilters, 1, nullptr);
+                    ImGui::SameLine();
+                    if (ImGui::Button("Load World..."))
+                        SDL_ShowOpenFileDialog(map_dialog_cb, (void*)5, win,
+                                               kWorldFilters, 1, nullptr,
+                                               false);
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Map")) {
