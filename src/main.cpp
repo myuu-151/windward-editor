@@ -1505,6 +1505,10 @@ static bool load_map(const char* path)
                                        tr[3], tr[4] });
             }
         }
+        // instances only render once their mesh is loaded -- placement
+        // does this lazily, imports must do it here
+        for (const PropInst& pi : gProps)
+            load_prop(pi.mesh);
     }
     gLoadedSettings = false;
     gLoadedTune = false;
