@@ -413,6 +413,73 @@ void main() {
 }
 )";
 
+// island skirt: the terrain rim extruded down into a rocky underside
+static const char* SKIRT_VS = R"(#version 330 core
+layout(location = 0) in vec3 aData;   // x, z, t (0 rim, 1 bottom, 2 center)
+uniform mat4 uMvp;
+uniform sampler2D uHeight;
+uniform float uHalf;
+uniform float uDepth;
+out vec3 vWorld;
+out vec3 vNormal;
+out float vT;
+
+float hash(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+float vnoise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash(i), hash(i + vec2(1, 0)), u.x),
+               mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), u.x), u.y);
+}
+
+void main() {
+    vec2 xz = aData.xy;
+    float t = aData.z;
+    vec3 pos;
+    if (t < 0.5) {
+        vec2 uv = (xz + vec2(uHalf)) / (2.0 * uHalf);
+        pos = vec3(xz.x, texture(uHeight, uv).r, xz.y);
+    } else if (t < 1.5) {
+        float n = vnoise(xz * 0.35);
+        pos = vec3(xz.x * 0.82, -uDepth * (0.55 + 0.5 * n), xz.y * 0.82);
+    } else {
+        pos = vec3(0.0, -uDepth * 1.25, 0.0);
+    }
+    vWorld = pos;
+    vNormal = normalize(vec3(xz.x, uDepth * 0.02 + 6.0, xz.y));
+    if (t > 1.5)
+        vNormal = vec3(0.0, -1.0, 0.0);
+    vT = min(t, 1.5);
+    gl_Position = uMvp * vec4(pos, 1.0);
+}
+)";
+
+static const char* SKIRT_FS = R"(#version 330 core
+in vec3 vWorld;
+in vec3 vNormal;
+in float vT;
+out vec4 fragColor;
+uniform sampler2D uCliffTex;
+
+void main() {
+    // triplanar rock over the underside, darkening toward the bottom
+    vec3 n = normalize(vNormal);
+    vec3 cx = texture(uCliffTex, vWorld.zy * 0.10).rgb;
+    vec3 cz = texture(uCliffTex, vWorld.xy * 0.10).rgb;
+    float wx = abs(n.x) / max(abs(n.x) + abs(n.z), 1e-4);
+    vec3 col = mix(cz, cx, wx);
+    vec3 L = normalize(vec3(0.35, 0.8, -0.45));
+    float diff = max(dot(n, L), 0.0);
+    col *= 0.62 + 0.38 * diff;
+    col *= mix(1.0, 0.45, vT / 1.5);
+    fragColor = vec4(col, 1.0);
+}
+)";
+
 // depth-only passes for the shadow map
 static const char* DEPTH_FS = R"(#version 330 core
 void main() {}
@@ -1593,6 +1660,7 @@ struct TuneBlob {
     float grassShadowDark = 0.55f, groundAO = 0.0f;
     float aoRadius = 2.5f, shadowStrength = 1.0f;
     char propSelId[96] = { 0 };   // selected prop as "category/label"
+    float islandDepth = 0.0f;
 };
 static TuneBlob gTune;
 static bool gLoadedTune = false;
@@ -2012,6 +2080,55 @@ int main(int argc, char** argv)
     GLuint emptyVao = 0;
     glGenVertexArrays(1, &emptyVao);
 
+    // island skirt geometry: perimeter ring (rim + bottom verts) + cap
+    GLuint skirtProg = make_program(SKIRT_VS, SKIRT_FS);
+    GLuint skirtVao = 0, skirtVbo = 0, skirtIbo = 0;
+    int skirtIdxCount = 0;
+    {
+        std::vector<float> ring;   // perimeter xz positions, CCW
+        for (int i = 0; i < GRID_N; i++)
+            ring.insert(ring.end(),
+                { -TER_HALF + 2.0f * TER_HALF * i / GRID_N, -TER_HALF });
+        for (int j = 0; j < GRID_N; j++)
+            ring.insert(ring.end(),
+                { TER_HALF, -TER_HALF + 2.0f * TER_HALF * j / GRID_N });
+        for (int i = GRID_N; i > 0; i--)
+            ring.insert(ring.end(),
+                { -TER_HALF + 2.0f * TER_HALF * i / GRID_N, TER_HALF });
+        for (int j = GRID_N; j > 0; j--)
+            ring.insert(ring.end(),
+                { -TER_HALF, -TER_HALF + 2.0f * TER_HALF * j / GRID_N });
+        int P = (int)ring.size() / 2;
+        std::vector<float> sv;          // x, z, t
+        for (int p = 0; p < P; p++) {
+            sv.insert(sv.end(), { ring[p * 2], ring[p * 2 + 1], 0.0f });
+            sv.insert(sv.end(), { ring[p * 2], ring[p * 2 + 1], 1.0f });
+        }
+        int centerIdx = P * 2;
+        sv.insert(sv.end(), { 0.0f, 0.0f, 2.0f });
+        std::vector<unsigned> si;
+        for (int p = 0; p < P; p++) {
+            unsigned a = p * 2, b = a + 1;
+            unsigned c = ((p + 1) % P) * 2, d = c + 1;
+            si.insert(si.end(), { a, b, c, c, b, d });       // side quad
+            si.insert(si.end(), { b, (unsigned)centerIdx, d }); // cap fan
+        }
+        skirtIdxCount = (int)si.size();
+        glGenVertexArrays(1, &skirtVao);
+        glGenBuffers(1, &skirtVbo);
+        glGenBuffers(1, &skirtIbo);
+        glBindVertexArray(skirtVao);
+        glBindBuffer(GL_ARRAY_BUFFER, skirtVbo);
+        glBufferData(GL_ARRAY_BUFFER, sv.size() * sizeof(float), sv.data(),
+                     GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, skirtIbo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, si.size() * sizeof(unsigned),
+                     si.data(), GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+        glBindVertexArray(0);
+    }
+
     // camera + editor state
     float yaw = 0.0f, pitch = -0.42f, fov = 55.0f;
     float camPos[3] = { 0.0f, 12.0f, 30.0f };
@@ -2026,6 +2143,7 @@ int main(int argc, char** argv)
     float groundAO = 0.0f;           // contact AO strength under blades
     float aoRadius = 2.5f;           // AO spread (mip level)
     float shadowStrength = 1.0f;     // sun shadow intensity
+    float islandDepth = 0.0f;        // skirt extrusion below the terrain
     // prop tools
     int activeTab = 0;          // 0 sculpt, 1 paint, 2 details, 3 props
     int sculptTool = 0, paintLayer = 0, detailTool = 0;
@@ -2070,6 +2188,7 @@ int main(int argc, char** argv)
         gTune.groundAO = groundAO;
         gTune.aoRadius = aoRadius;
         gTune.shadowStrength = shadowStrength;
+        gTune.islandDepth = islandDepth;
         memset(gTune.propSelId, 0, sizeof gTune.propSelId);
         if (propSel >= 0 && propSel < (int)gPropMeshes.size())
             SDL_strlcpy(gTune.propSelId,
@@ -2110,6 +2229,7 @@ int main(int argc, char** argv)
             groundAO = gTune.groundAO;
             aoRadius = gTune.aoRadius;
             shadowStrength = gTune.shadowStrength;
+            islandDepth = gTune.islandDepth;
             if (gTune.propSelId[0]) {
                 for (int mi = 0; mi < (int)gPropMeshes.size(); mi++)
                     if (mesh_id(gPropMeshes[mi]) == gTune.propSelId) {
@@ -2515,6 +2635,26 @@ int main(int argc, char** argv)
         glBindVertexArray(terVao);
         glDrawElements(GL_TRIANGLES, (GLsizei)idx.size(), GL_UNSIGNED_INT, nullptr);
 
+        // island skirt underside
+        if (islandDepth > 0.05f) {
+            glUseProgram(skirtProg);
+            glUniformMatrix4fv(glGetUniformLocation(skirtProg, "uMvp"), 1,
+                               GL_FALSE, mvp.m);
+            glUniform1f(glGetUniformLocation(skirtProg, "uHalf"), TER_HALF);
+            glUniform1f(glGetUniformLocation(skirtProg, "uDepth"),
+                        islandDepth);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, gHeightTex);
+            glUniform1i(glGetUniformLocation(skirtProg, "uHeight"), 0);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, cliffTex);
+            glUniform1i(glGetUniformLocation(skirtProg, "uCliffTex"), 1);
+            glDisable(GL_CULL_FACE);
+            glBindVertexArray(skirtVao);
+            glDrawElements(GL_TRIANGLES, skirtIdxCount, GL_UNSIGNED_INT,
+                           nullptr);
+        }
+
         // props
         if (!gProps.empty()) {
             glUseProgram(propProg);
@@ -2683,6 +2823,8 @@ int main(int argc, char** argv)
                     if (mode == BRUSH_TERRACE)
                         ImGui::SliderFloat("Step Height", &gTerraceStep,
                                            0.5f, 6.0f, "%.1f");
+                    ImGui::SliderFloat("Island Extrusion", &islandDepth,
+                                       0.0f, 30.0f, "%.1f");
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Paint")) {
