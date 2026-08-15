@@ -81,6 +81,26 @@ uniform vec3  uBrushCol;
 uniform sampler2D uBrushStamp;
 uniform float uBrushFalloff;
 uniform float uEdgeBreak;   // 0 = crisp edges, 1 = wide ragged breakup
+uniform sampler2D uShadowMap;
+uniform mat4 uLightMvp;
+uniform int uShadowsOn;
+
+float shadow_factor(vec3 world) {
+    if (uShadowsOn == 0)
+        return 1.0;
+    vec4 lc = uLightMvp * vec4(world, 1.0);
+    vec3 p = lc.xyz / lc.w * 0.5 + 0.5;
+    if (p.x < 0.0 || p.x > 1.0 || p.y < 0.0 || p.y > 1.0 || p.z > 1.0)
+        return 1.0;
+    float s = 0.0;
+    vec2 ts = 1.0 / vec2(textureSize(uShadowMap, 0));
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++) {
+            float d = texture(uShadowMap, p.xy + vec2(dx, dy) * ts).r;
+            s += (p.z - 0.0022 > d) ? 0.0 : 1.0;
+        }
+    return s / 9.0;
+}
 
 float hash(vec2 p) {
     p = fract(p * vec2(123.34, 456.21));
@@ -152,6 +172,7 @@ void main() {
 
     vec3 L = normalize(vec3(0.35, 0.8, -0.45));
     float diff = max(dot(normalize(vNormal), L), 0.0);
+    diff *= shadow_factor(vWorld);
     col *= 0.72 + 0.38 * diff;
 
     // brush preview: project the stamp (with the falloff curve) inside
@@ -264,11 +285,13 @@ uniform mat4 uModel;
 out vec3 vNorm;
 out vec2 vUv;
 out float vLocalY;
+out vec3 vWorld;
 void main() {
     vec4 world = uModel * vec4(aPos, 1.0);
     vNorm = mat3(uModel) * aNorm;
     vUv = aUv;
     vLocalY = aPos.y;
+    vWorld = world.xyz;
     gl_Position = uMvp * world;
 }
 )";
@@ -277,6 +300,7 @@ static const char* PROP_FS = R"(#version 330 core
 in vec3 vNorm;
 in vec2 vUv;
 in float vLocalY;
+in vec3 vWorld;
 out vec4 fragColor;
 uniform sampler2D uTex;
 uniform vec3 uKd;      // top/main color (the pack's material gradient)
@@ -284,10 +308,38 @@ uniform vec3 uKa;      // bottom color
 uniform float uBoundH; // mesh height for the gradient
 uniform int uHasTex;
 uniform int uGrayMask; // texture is a grayscale mask, not albedo
+uniform sampler2D uShadowMap;
+uniform mat4 uLightMvp;
+uniform int uShadowsOn;
+
+float shadow_factor(vec3 world) {
+    if (uShadowsOn == 0)
+        return 1.0;
+    vec4 lc = uLightMvp * vec4(world, 1.0);
+    vec3 p = lc.xyz / lc.w * 0.5 + 0.5;
+    if (p.x < 0.0 || p.x > 1.0 || p.y < 0.0 || p.y > 1.0 || p.z > 1.0)
+        return 1.0;
+    float s = 0.0;
+    vec2 ts = 1.0 / vec2(textureSize(uShadowMap, 0));
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++) {
+            float d = texture(uShadowMap, p.xy + vec2(dx, dy) * ts).r;
+            s += (p.z - 0.003 > d) ? 0.0 : 1.0;
+        }
+    return s / 9.0;
+}
+
 void main() {
     vec4 t = uHasTex == 1 ? texture(uTex, vUv) : vec4(1.0);
-    if (t.a < 0.5)
-        discard;
+    // mask textures (all-opaque alpha) cut out by luminance instead
+    if (uHasTex == 1) {
+        if (uGrayMask == 1) {
+            if (t.r < 0.35 && t.a > 0.99)
+                discard;
+        }
+        if (t.a < 0.5)
+            discard;
+    }
     // the pack colors meshes with a bottom->top material gradient; mask
     // textures only modulate detail
     vec3 grad = mix(uKa, uKd, clamp(vLocalY / max(uBoundH, 0.001), 0.0, 1.0));
@@ -298,8 +350,32 @@ void main() {
     float diff = max(dot(n, L), 0.0);
     // double-sided: leaves faces flip freely
     diff = max(diff, max(dot(-n, L), 0.0) * 0.8);
+    diff *= shadow_factor(vWorld);
     col *= 0.68 + 0.42 * diff;
     fragColor = vec4(col, 1.0);
+}
+)";
+
+// depth-only passes for the shadow map
+static const char* DEPTH_FS = R"(#version 330 core
+void main() {}
+)";
+
+static const char* DEPTH_PROP_FS = R"(#version 330 core
+in vec2 vUv;
+uniform sampler2D uTex;
+uniform int uHasTex;
+uniform int uGrayMask;
+void main() {
+    if (uHasTex == 1) {
+        vec4 t = texture(uTex, vUv);
+        if (uGrayMask == 1) {
+            if (t.r < 0.35 && t.a > 0.99)
+                discard;
+        }
+        if (t.a < 0.5)
+            discard;
+    }
 }
 )";
 
@@ -465,6 +541,42 @@ static Mat4 view_matrix(const Mat4& camRot, float px, float py, float pz)
     v.m[14] = -(v.m[2] * px + v.m[6] * py + v.m[10] * pz);
     v.m[15] = 1.0f;
     return v;
+}
+
+static Mat4 mat4_ortho(float l, float r, float b, float t, float zn, float zf)
+{
+    Mat4 m{};
+    m.m[0] = 2.0f / (r - l);
+    m.m[5] = 2.0f / (t - b);
+    m.m[10] = -2.0f / (zf - zn);
+    m.m[12] = -(r + l) / (r - l);
+    m.m[13] = -(t + b) / (t - b);
+    m.m[14] = -(zf + zn) / (zf - zn);
+    m.m[15] = 1.0f;
+    return m;
+}
+
+static Mat4 mat4_lookat(const float eye[3], const float at[3])
+{
+    float f[3] = { at[0] - eye[0], at[1] - eye[1], at[2] - eye[2] };
+    float fl = sqrtf(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+    f[0] /= fl; f[1] /= fl; f[2] /= fl;
+    float up[3] = { 0, 1, 0 };
+    float s[3] = { f[1] * up[2] - f[2] * up[1], f[2] * up[0] - f[0] * up[2],
+                   f[0] * up[1] - f[1] * up[0] };
+    float sl = sqrtf(s[0] * s[0] + s[1] * s[1] + s[2] * s[2]);
+    s[0] /= sl; s[1] /= sl; s[2] /= sl;
+    float u[3] = { s[1] * f[2] - s[2] * f[1], s[2] * f[0] - s[0] * f[2],
+                   s[0] * f[1] - s[1] * f[0] };
+    Mat4 m{};
+    m.m[0] = s[0]; m.m[4] = s[1]; m.m[8] = s[2];
+    m.m[1] = u[0]; m.m[5] = u[1]; m.m[9] = u[2];
+    m.m[2] = -f[0]; m.m[6] = -f[1]; m.m[10] = -f[2];
+    m.m[12] = -(s[0] * eye[0] + s[1] * eye[1] + s[2] * eye[2]);
+    m.m[13] = -(u[0] * eye[0] + u[1] * eye[1] + u[2] * eye[2]);
+    m.m[14] = f[0] * eye[0] + f[1] * eye[1] + f[2] * eye[2];
+    m.m[15] = 1.0f;
+    return m;
 }
 
 static Mat4 model_trs(float x, float y, float z, float yaw, float s)
@@ -1286,6 +1398,26 @@ static void upload_dirty()
     }
 }
 
+// bundled with the map so an exported file restores the whole session:
+// view settings + camera (synced from main() around save/load calls)
+static float gSetBlade = 0.8f, gSetEdge = 0.5f;
+static float gSetCam[5] = { 0.0f, 12.0f, 30.0f, 0.0f, -0.42f };
+static bool gLoadedSettings = false;
+
+// every live tweak in one blob so an exported map restores the exact
+// session: brush setup, tool selections, prop tuning, UI
+struct TuneBlob {
+    float brushRadius = 2.5f, brushStrength = 1.0f, paintTarget = 1.0f;
+    float falloff = 1.0f, grassDensity = 1.0f, terraceStep = 2.0f;
+    float propScale = 1.0f, propScaleRand = 0.35f, propDensity = 2.0f;
+    float propSpacing = 2.0f, propYawFixed = 0.0f, uiScale = 1.5f;
+    int stamp = 1, grassPattern = 0, showGrass = 1, randomYaw = 1;
+    int sculptTool = 0, paintLayer = 0, detailTool = 0, propTool = 0;
+    int propCat = 0, shadows = 1;
+};
+static TuneBlob gTune;
+static bool gLoadedTune = false;
+
 static void save_map(const char* path)
 {
     FILE* f = fopen(path, "wb");
@@ -1293,7 +1425,7 @@ static void save_map(const char* path)
         SDL_Log("save failed: %s", path);
         return;
     }
-    const char magic[8] = { 'T','E','R','M','A','P','0','4' };
+    const char magic[8] = { 'T','E','R','M','A','P','0','6' };
     fwrite(magic, 1, 8, f);
     fwrite(gHeights.data(), sizeof(float), gHeights.size(), f);
     fwrite(gMask.data(), 1, gMask.size(), f);
@@ -1311,6 +1443,10 @@ static void save_map(const char* path)
         float tr[5] = { pi.x, pi.y, pi.z, pi.yaw, pi.scale };
         fwrite(tr, sizeof(float), 5, f);
     }
+    fwrite(&gSetBlade, sizeof(float), 1, f);
+    fwrite(&gSetEdge, sizeof(float), 1, f);
+    fwrite(gSetCam, sizeof(float), 5, f);
+    fwrite(&gTune, sizeof gTune, 1, f);
     fclose(f);
     SDL_Log("saved %s", path);
 }
@@ -1361,10 +1497,37 @@ static bool load_map(const char* path)
             }
         }
     }
+    gLoadedSettings = false;
+    gLoadedTune = false;
+    if (magic[7] >= '5') {
+        if (fread(&gSetBlade, sizeof(float), 1, f) == 1 &&
+            fread(&gSetEdge, sizeof(float), 1, f) == 1 &&
+            fread(gSetCam, sizeof(float), 5, f) == 5)
+            gLoadedSettings = true;
+    }
+    if (magic[7] >= '6' && fread(&gTune, sizeof gTune, 1, f) == 1)
+        gLoadedTune = true;
     fclose(f);
     gHeightsDirty = gMaskDirty = gMask2Dirty = gKillDirty = true;
     SDL_Log("loaded %s", path);
     return true;
+}
+
+// async file-dialog plumbing (SDL may invoke the callback off-thread:
+// stash the result, act on it from the main loop)
+static volatile int gDialogAction = 0;   // 1 = save, 2 = load
+static char gDialogFile[1024];
+static const SDL_DialogFileFilter kMapFilters[] = {
+    { "Windward map", "wmap" },
+};
+
+static void SDLCALL map_dialog_cb(void* userdata,
+                                  const char* const* filelist, int)
+{
+    if (filelist && filelist[0]) {
+        SDL_strlcpy(gDialogFile, filelist[0], sizeof gDialogFile);
+        gDialogAction = (int)(intptr_t)userdata;
+    }
 }
 
 // stamp the demo diorama for --shot: a wobbly two-rut path plus a low hill
@@ -1443,7 +1606,43 @@ int main(int argc, char** argv)
     GLuint grassProg = make_program(GRASS_VS, GRASS_FS);
     GLuint skyProg = make_program(SKY_VS, SKY_FS);
     GLuint propProg = make_program(PROP_VS, PROP_FS);
+    GLuint depthTerProg = make_program(TER_VS, DEPTH_FS);
+    GLuint depthPropProg = make_program(PROP_VS, DEPTH_PROP_FS);
     make_stamps();
+
+    // shadow map
+    const int SHADOW_N = 2048;
+    GLuint shadowTex = 0, shadowFbo = 0;
+    glGenTextures(1, &shadowTex);
+    glBindTexture(GL_TEXTURE_2D, shadowTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, SHADOW_N, SHADOW_N,
+                 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glGenFramebuffers(1, &shadowFbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                           GL_TEXTURE_2D, shadowTex, 0);
+    glDrawBuffer(GL_NONE);
+    glReadBuffer(GL_NONE);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        SDL_Log("shadow FBO incomplete");
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    // sun matrices (static light direction shared with the shaders)
+    Mat4 lightMvp;
+    {
+        float L[3] = { 0.35f, 0.8f, -0.45f };
+        float ll = sqrtf(L[0] * L[0] + L[1] * L[1] + L[2] * L[2]);
+        float eye[3] = { L[0] / ll * 60.0f, L[1] / ll * 60.0f,
+                         L[2] / ll * 60.0f };
+        float at[3] = { 0, 0, 0 };
+        Mat4 lv = mat4_lookat(eye, at);
+        Mat4 lp = mat4_ortho(-40, 40, -40, 40, 15.0f, 130.0f);
+        lightMvp = mat4_mul(lp, lv);
+    }
 
     // asset textures live next to the exe's source tree
     char base[512];
@@ -1594,8 +1793,11 @@ int main(int argc, char** argv)
     float paintTarget = 1.0f;
     float edgeBreak = 0.5f;
     float bladeDensity = 0.8f;
+    bool showGrass = true;
+    bool shadowsOn = true;
     // prop tools
     int activeTab = 0;          // 0 sculpt, 1 paint, 2 details, 3 props
+    int sculptTool = 0, paintLayer = 0, detailTool = 0;
     int propTool = 0;           // 0 place, 1 scatter, 2 erase, 3 select
     int propCat = 0, propSel = -1, selInst = -1;
     float propScale = 1.0f, propScaleRand = 0.35f, propYawFixed = 0.0f;
@@ -1606,8 +1808,72 @@ int main(int argc, char** argv)
         propRng = propRng * 1664525u + 1013904223u;
         return (propRng >> 8) * (1.0f / 16777216.0f);
     };
+    auto syncSettingsOut = [&]() {
+        gSetBlade = bladeDensity;
+        gSetEdge = edgeBreak;
+        gSetCam[0] = camPos[0]; gSetCam[1] = camPos[1]; gSetCam[2] = camPos[2];
+        gSetCam[3] = yaw; gSetCam[4] = pitch;
+        gTune.brushRadius = brushRadius;
+        gTune.brushStrength = brushStrength;
+        gTune.paintTarget = paintTarget;
+        gTune.falloff = gBrushFalloff;
+        gTune.grassDensity = gGrassDensity;
+        gTune.terraceStep = gTerraceStep;
+        gTune.propScale = propScale;
+        gTune.propScaleRand = propScaleRand;
+        gTune.propDensity = propDensity;
+        gTune.propSpacing = propSpacing;
+        gTune.propYawFixed = propYawFixed;
+        gTune.uiScale = uiScale;
+        gTune.stamp = gStamp;
+        gTune.grassPattern = gGrassPattern;
+        gTune.showGrass = showGrass ? 1 : 0;
+        gTune.randomYaw = propRandomYaw ? 1 : 0;
+        gTune.sculptTool = sculptTool;
+        gTune.paintLayer = paintLayer;
+        gTune.detailTool = detailTool;
+        gTune.propTool = propTool;
+        gTune.propCat = propCat;
+        gTune.shadows = shadowsOn ? 1 : 0;
+    };
+    auto applySettingsIn = [&]() {
+        if (gLoadedSettings) {
+            bladeDensity = gSetBlade;
+            edgeBreak = gSetEdge;
+            camPos[0] = gSetCam[0]; camPos[1] = gSetCam[1];
+            camPos[2] = gSetCam[2];
+            yaw = gSetCam[3]; pitch = gSetCam[4];
+        }
+        if (gLoadedTune) {
+            brushRadius = gTune.brushRadius;
+            brushStrength = gTune.brushStrength;
+            paintTarget = gTune.paintTarget;
+            gBrushFalloff = gTune.falloff;
+            gGrassDensity = gTune.grassDensity;
+            gTerraceStep = gTune.terraceStep;
+            propScale = gTune.propScale;
+            propScaleRand = gTune.propScaleRand;
+            propDensity = gTune.propDensity;
+            propSpacing = gTune.propSpacing;
+            propYawFixed = gTune.propYawFixed;
+            gStamp = SDL_clamp(gTune.stamp, 0, (int)gStamps.size() - 1);
+            gGrassPattern = SDL_clamp(gTune.grassPattern, 0, 2);
+            showGrass = gTune.showGrass != 0;
+            propRandomYaw = gTune.randomYaw != 0;
+            sculptTool = SDL_clamp(gTune.sculptTool, 0, 4);
+            paintLayer = SDL_clamp(gTune.paintLayer, 0, 2);
+            detailTool = SDL_clamp(gTune.detailTool, 0, 1);
+            propTool = SDL_clamp(gTune.propTool, 0, 3);
+            propCat = gTune.propCat;
+            shadowsOn = gTune.shadows != 0;
+            update_stamp_thumbnails();
+            if (fabsf(uiScale - gTune.uiScale) > 0.01f) {
+                uiScale = gTune.uiScale;
+                applyUiScale();
+            }
+        }
+    };
     BrushMode mode = BRUSH_RAISE;
-    bool showGrass = true;
     bool wasPainting = false;
     bool running = true;
     double simTime = 0.0;
@@ -1652,8 +1918,8 @@ int main(int argc, char** argv)
                 }
                 if (e.key.key == SDLK_Y && (e.key.mod & SDL_KMOD_CTRL))
                     do_redo();
-                if (e.key.key == SDLK_F5) save_map(mapPath);
-                if (e.key.key == SDLK_F9) load_map(mapPath);
+                if (e.key.key == SDLK_F5) { syncSettingsOut(); save_map(mapPath); }
+                if (e.key.key == SDLK_F9) { load_map(mapPath); applySettingsIn(); }
                 if (e.key.key == SDLK_LEFTBRACKET)
                     brushRadius = SDL_max(0.4f, brushRadius - 0.4f);
                 if (e.key.key == SDLK_RIGHTBRACKET)
@@ -1672,6 +1938,20 @@ int main(int argc, char** argv)
                                             0.4f, 10.0f);
                 break;
             }
+        }
+
+        // act on finished file dialogs (callback may run off-thread)
+        if (gDialogAction == 1) {
+            gDialogAction = 0;
+            std::string p = gDialogFile;
+            if (p.size() < 5 || p.substr(p.size() - 5) != ".wmap")
+                p += ".wmap";
+            syncSettingsOut();
+            save_map(p.c_str());
+        } else if (gDialogAction == 2) {
+            gDialogAction = 0;
+            if (load_map(gDialogFile))
+                applySettingsIn();
         }
 
         ImGui_ImplOpenGL3_NewFrame();
@@ -1830,6 +2110,54 @@ int main(int argc, char** argv)
 
         upload_dirty();
 
+        // shadow pass: terrain + props into the depth map from the sun
+        if (shadowsOn) {
+            glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo);
+            glViewport(0, 0, SHADOW_N, SHADOW_N);
+            glClear(GL_DEPTH_BUFFER_BIT);
+            glEnable(GL_DEPTH_TEST);
+            glDepthFunc(GL_LESS);
+            glDepthMask(GL_TRUE);
+            glUseProgram(depthTerProg);
+            glUniformMatrix4fv(glGetUniformLocation(depthTerProg, "uMvp"),
+                               1, GL_FALSE, lightMvp.m);
+            glUniform1f(glGetUniformLocation(depthTerProg, "uHalf"), TER_HALF);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, gHeightTex);
+            glUniform1i(glGetUniformLocation(depthTerProg, "uHeight"), 0);
+            glBindVertexArray(terVao);
+            glDrawElements(GL_TRIANGLES, (GLsizei)idx.size(), GL_UNSIGNED_INT,
+                           nullptr);
+            if (!gProps.empty()) {
+                glUseProgram(depthPropProg);
+                glUniformMatrix4fv(
+                    glGetUniformLocation(depthPropProg, "uMvp"), 1, GL_FALSE,
+                    lightMvp.m);
+                glUniform1i(glGetUniformLocation(depthPropProg, "uTex"), 0);
+                GLint dModel = glGetUniformLocation(depthPropProg, "uModel");
+                GLint dHasTex = glGetUniformLocation(depthPropProg, "uHasTex");
+                GLint dGray = glGetUniformLocation(depthPropProg, "uGrayMask");
+                for (const PropInst& inst : gProps) {
+                    PropMesh& pm = gPropMeshes[inst.mesh];
+                    if (!pm.loaded)
+                        continue;
+                    Mat4 mdl = model_trs(inst.x, inst.y, inst.z, inst.yaw,
+                                         inst.scale);
+                    glUniformMatrix4fv(dModel, 1, GL_FALSE, mdl.m);
+                    glBindVertexArray(pm.vao);
+                    for (const PropSubmesh& sub : pm.subs) {
+                        const PropMaterial& mat = pm.mats[sub.mat];
+                        glUniform1i(dHasTex, mat.tex ? 1 : 0);
+                        glUniform1i(dGray, mat.grayMask ? 1 : 0);
+                        if (mat.tex)
+                            glBindTexture(GL_TEXTURE_2D, mat.tex);
+                        glDrawArrays(GL_TRIANGLES, sub.first, sub.count);
+                    }
+                }
+            }
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        }
+
         glViewport(0, 0, w, h);
         Mat4 camRot = cam_rotation(yaw, pitch);
         Mat4 view = view_matrix(camRot, camPos[0], camPos[1], camPos[2]);
@@ -1878,6 +2206,13 @@ int main(int argc, char** argv)
         // update_stamp_thumbnails, so the preview shader applies none
         glUniform1f(glGetUniformLocation(terProg, "uBrushFalloff"), 1.0f);
         glUniform1f(glGetUniformLocation(terProg, "uEdgeBreak"), edgeBreak);
+        glActiveTexture(GL_TEXTURE8);
+        glBindTexture(GL_TEXTURE_2D, shadowTex);
+        glUniform1i(glGetUniformLocation(terProg, "uShadowMap"), 8);
+        glUniformMatrix4fv(glGetUniformLocation(terProg, "uLightMvp"), 1,
+                           GL_FALSE, lightMvp.m);
+        glUniform1i(glGetUniformLocation(terProg, "uShadowsOn"),
+                    shadowsOn ? 1 : 0);
         glBindVertexArray(terVao);
         glDrawElements(GL_TRIANGLES, (GLsizei)idx.size(), GL_UNSIGNED_INT, nullptr);
 
@@ -1887,6 +2222,13 @@ int main(int argc, char** argv)
             glUniformMatrix4fv(glGetUniformLocation(propProg, "uMvp"), 1,
                                GL_FALSE, mvp.m);
             glDisable(GL_CULL_FACE);
+            glActiveTexture(GL_TEXTURE5);
+            glBindTexture(GL_TEXTURE_2D, shadowTex);
+            glUniform1i(glGetUniformLocation(propProg, "uShadowMap"), 5);
+            glUniformMatrix4fv(glGetUniformLocation(propProg, "uLightMvp"),
+                               1, GL_FALSE, lightMvp.m);
+            glUniform1i(glGetUniformLocation(propProg, "uShadowsOn"),
+                        shadowsOn ? 1 : 0);
             glActiveTexture(GL_TEXTURE0);
             glUniform1i(glGetUniformLocation(propProg, "uTex"), 0);
             GLint locModel = glGetUniformLocation(propProg, "uModel");
@@ -1970,10 +2312,6 @@ int main(int argc, char** argv)
                          ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
                          ImGuiWindowFlags_NoCollapse |
                          ImGuiWindowFlags_NoBringToFrontOnFocus);
-
-            static int sculptTool = 0;
-            static int paintLayer = 0;
-            static int detailTool = 0;
 
             // Unity-style brush gallery + shared size/opacity controls
             auto brushGallery = [&]() {
@@ -2194,11 +2532,28 @@ int main(int argc, char** argv)
                 }
                 if (ImGui::BeginTabItem("Map")) {
                     activeTab = 4;
-                    if (ImGui::Button("Save (F5)"))
+                    if (ImGui::Button("Save (F5)")) {
+                        syncSettingsOut();
                         save_map(mapPath);
+                    }
                     ImGui::SameLine();
-                    if (ImGui::Button("Load (F9)"))
+                    if (ImGui::Button("Load (F9)")) {
                         load_map(mapPath);
+                        applySettingsIn();
+                    }
+                    ImGui::Checkbox("Shadows", &shadowsOn);
+                    ImGui::SeparatorText("File");
+                    if (ImGui::Button("Export Map..."))
+                        SDL_ShowSaveFileDialog(map_dialog_cb, (void*)1, win,
+                                               kMapFilters, 1, nullptr);
+                    ImGui::SameLine();
+                    if (ImGui::Button("Import Map..."))
+                        SDL_ShowOpenFileDialog(map_dialog_cb, (void*)2, win,
+                                               kMapFilters, 1, nullptr,
+                                               false);
+                    ImGui::TextWrapped("Exports everything: terrain, paint "
+                                       "layers, grass, props, view settings "
+                                       "and camera.");
                     if (ImGui::SliderFloat("UI Scale", &uiScale,
                                            1.0f, 2.5f, "%.1f"))
                         applyUiScale();

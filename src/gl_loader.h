@@ -57,6 +57,13 @@ extern PFNGLUNIFORMMATRIX4X3FVPROC glUniformMatrix4x3fv;
 extern PFNGLGETUNIFORMBLOCKINDEXPROC glGetUniformBlockIndex;
 extern PFNGLUNIFORMBLOCKBINDINGPROC glUniformBlockBinding;
 
+// framebuffers
+extern PFNGLGENFRAMEBUFFERSPROC glGenFramebuffers;
+extern PFNGLBINDFRAMEBUFFERPROC glBindFramebuffer;
+extern PFNGLFRAMEBUFFERTEXTURE2DPROC glFramebufferTexture2D;
+extern PFNGLCHECKFRAMEBUFFERSTATUSPROC glCheckFramebufferStatus;
+extern PFNGLDELETEFRAMEBUFFERSPROC glDeleteFramebuffers;
+
 // textures / misc
 // SDL_opengl.h declares a real prototype for glActiveTexture (GL 1.3), but
 // opengl32.lib doesn't export it -- route through a differently named pointer.
