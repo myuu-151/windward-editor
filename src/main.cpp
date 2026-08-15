@@ -82,10 +82,12 @@ uniform sampler2D uBrushStamp;
 uniform float uBrushFalloff;
 uniform float uEdgeBreak;   // 0 = crisp edges, 1 = wide ragged breakup
 uniform sampler2D uShadowMap;
-uniform sampler2D uKillMap;
+uniform sampler2D uAOMap;   // live top-down blade render (white = open)
 uniform mat4 uLightMvp;
 uniform int uShadowsOn;
-uniform float uGrassAO;   // ground contact-darkening under dense blades
+uniform float uGrassAO;    // ground contact-darkening strength
+uniform float uGrassAORad; // sampling mip level = occlusion radius
+uniform float uShadowStr;  // sun shadow intensity
 
 float shadow_factor(vec3 world) {
     if (uShadowsOn == 0)
@@ -172,15 +174,15 @@ void main() {
     float cliffM = smoothstep(0.22, 0.42, slope + (fbm(vWorld.xz * 1.7) - 0.5) * 0.18);
     col = mix(col, cliff, cliffM);
 
-    // fake baked AO: ground darkens where blades stand on it (the painted
-    // density mask doubles as an occlusion map), fading out on dirt/cliff
-    float bladeDens = 1.0 - texture(uKillMap, maskUv).r;
-    float grassArea = (1.0 - edge) * (1.0 - edge2) * (1.0 - cliffM);
-    col *= 1.0 - uGrassAO * bladeDens * grassArea;
+    // live AO: the blades are rendered top-down into uAOMap each frame,
+    // so this darkening sits exactly where blades stand; the mip level
+    // sets how far the contact shadow spreads
+    float open = textureLod(uAOMap, maskUv, uGrassAORad).r;
+    col *= 1.0 - uGrassAO * (1.0 - open) * (1.0 - cliffM);
 
     vec3 L = normalize(vec3(0.35, 0.8, -0.45));
     float diff = max(dot(normalize(vNormal), L), 0.0);
-    diff *= shadow_factor(vWorld);
+    diff *= mix(1.0, shadow_factor(vWorld), uShadowStr);
     col *= 0.72 + 0.38 * diff;
 
     // brush preview: project the stamp (with the falloff curve) inside
@@ -343,6 +345,7 @@ uniform int uGrayMask; // texture is a grayscale mask, not albedo
 uniform sampler2D uShadowMap;
 uniform mat4 uLightMvp;
 uniform int uShadowsOn;
+uniform float uShadowStr;  // sun shadow intensity
 
 float shadow_factor(vec3 world) {
     if (uShadowsOn == 0)
@@ -381,7 +384,7 @@ void main() {
     col *= vVCol;   // vertex tint (bamboo segments etc.), white when absent
     vec3 L = normalize(vec3(0.35, 0.8, -0.45));
     vec3 n = normalize(vNorm);
-    float sf = shadow_factor(vWorld);
+    float sf = mix(1.0, shadow_factor(vWorld), uShadowStr);
     if (uGrayMask == 1) {
         // foliage: soft wrap lighting and mostly shadow-immune, so
         // canopies read as toon masses instead of speckled black --
@@ -402,6 +405,12 @@ void main() {
 // depth-only passes for the shadow map
 static const char* DEPTH_FS = R"(#version 330 core
 void main() {}
+)";
+
+// blades drawn black into the live ground-AO map
+static const char* AO_FS = R"(#version 330 core
+out vec4 fragColor;
+void main() { fragColor = vec4(0.0, 0.0, 0.0, 1.0); }
 )";
 
 static const char* DEPTH_PROP_FS = R"(#version 330 core
@@ -1571,6 +1580,7 @@ struct TuneBlob {
     int sculptTool = 0, paintLayer = 0, detailTool = 0, propTool = 0;
     int propCat = 0, shadows = 1;
     float grassShadowDark = 0.55f, groundAO = 0.0f;
+    float aoRadius = 2.5f, shadowStrength = 1.0f;
 };
 static TuneBlob gTune;
 static bool gLoadedTune = false;
@@ -1769,7 +1779,33 @@ int main(int argc, char** argv)
     GLuint propProg = make_program(PROP_VS, PROP_FS);
     GLuint depthTerProg = make_program(TER_VS, DEPTH_FS);
     GLuint depthPropProg = make_program(PROP_VS, DEPTH_PROP_FS);
+    GLuint aoProg = make_program(GRASS_VS, AO_FS);
     make_stamps();
+
+    // live ground-AO map: blades rendered top-down, mipmapped for radius
+    const int AO_N = 1024;
+    GLuint aoTex = 0, aoFbo = 0;
+    glGenTextures(1, &aoTex);
+    glBindTexture(GL_TEXTURE_2D, aoTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, AO_N, AO_N, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glGenFramebuffers(1, &aoFbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, aoFbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, aoTex, 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        SDL_Log("AO FBO incomplete");
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    // top-down projection: world xz -> clip xy over the terrain extent
+    Mat4 topDown{};
+    topDown.m[0] = 1.0f / TER_HALF;
+    topDown.m[9] = 1.0f / TER_HALF;
+    topDown.m[15] = 1.0f;
 
     // shadow map
     const int SHADOW_N = 2048;
@@ -1957,7 +1993,9 @@ int main(int argc, char** argv)
     bool showGrass = true;
     bool shadowsOn = true;
     float grassShadowDark = 0.55f;   // blade brightness inside shadow
-    float groundAO = 0.0f;           // contact AO under dense blades
+    float groundAO = 0.0f;           // contact AO strength under blades
+    float aoRadius = 2.5f;           // AO spread (mip level)
+    float shadowStrength = 1.0f;     // sun shadow intensity
     // prop tools
     int activeTab = 0;          // 0 sculpt, 1 paint, 2 details, 3 props
     int sculptTool = 0, paintLayer = 0, detailTool = 0;
@@ -2000,6 +2038,8 @@ int main(int argc, char** argv)
         gTune.shadows = shadowsOn ? 1 : 0;
         gTune.grassShadowDark = grassShadowDark;
         gTune.groundAO = groundAO;
+        gTune.aoRadius = aoRadius;
+        gTune.shadowStrength = shadowStrength;
     };
     auto applySettingsIn = [&]() {
         if (gLoadedSettings) {
@@ -2033,6 +2073,8 @@ int main(int argc, char** argv)
             shadowsOn = gTune.shadows != 0;
             grassShadowDark = gTune.grassShadowDark;
             groundAO = gTune.groundAO;
+            aoRadius = gTune.aoRadius;
+            shadowStrength = gTune.shadowStrength;
             update_stamp_thumbnails();
             if (fabsf(uiScale - gTune.uiScale) > 0.01f) {
                 uiScale = gTune.uiScale;
@@ -2277,6 +2319,44 @@ int main(int argc, char** argv)
 
         upload_dirty();
 
+        // live ground-AO pass: blades top-down into the AO map
+        {
+            glBindFramebuffer(GL_FRAMEBUFFER, aoFbo);
+            glViewport(0, 0, AO_N, AO_N);
+            glDisable(GL_DEPTH_TEST);
+            glClearColor(1, 1, 1, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
+            if (showGrass && groundAO > 0.001f) {
+                glUseProgram(aoProg);
+                glUniformMatrix4fv(glGetUniformLocation(aoProg, "uMvp"), 1,
+                                   GL_FALSE, topDown.m);
+                glUniform1f(glGetUniformLocation(aoProg, "uHalf"), TER_HALF);
+                glUniform1f(glGetUniformLocation(aoProg, "uTime"),
+                            (float)simTime);
+                glUniform1f(glGetUniformLocation(aoProg, "uDensity"),
+                            bladeDensity);
+                glUniform1i(glGetUniformLocation(aoProg, "uShadowsOn"), 0);
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, gHeightTex);
+                glUniform1i(glGetUniformLocation(aoProg, "uHeight"), 0);
+                glActiveTexture(GL_TEXTURE1);
+                glBindTexture(GL_TEXTURE_2D, gMaskTex);
+                glUniform1i(glGetUniformLocation(aoProg, "uMask"), 1);
+                glActiveTexture(GL_TEXTURE3);
+                glBindTexture(GL_TEXTURE_2D, gKillTex);
+                glUniform1i(glGetUniformLocation(aoProg, "uKill"), 3);
+                glActiveTexture(GL_TEXTURE4);
+                glBindTexture(GL_TEXTURE_2D, gMask2Tex);
+                glUniform1i(glGetUniformLocation(aoProg, "uMask2"), 4);
+                glBindVertexArray(grassVao);
+                glDrawArraysInstanced(GL_TRIANGLES, 0, 12, instCount);
+            }
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glBindTexture(GL_TEXTURE_2D, aoTex);
+            glGenerateMipmap(GL_TEXTURE_2D);
+            glEnable(GL_DEPTH_TEST);
+        }
+
         // shadow pass: terrain + props into the depth map from the sun
         if (shadowsOn) {
             glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo);
@@ -2377,9 +2457,12 @@ int main(int argc, char** argv)
         glBindTexture(GL_TEXTURE_2D, shadowTex);
         glUniform1i(glGetUniformLocation(terProg, "uShadowMap"), 8);
         glActiveTexture(GL_TEXTURE9);
-        glBindTexture(GL_TEXTURE_2D, gKillTex);
-        glUniform1i(glGetUniformLocation(terProg, "uKillMap"), 9);
+        glBindTexture(GL_TEXTURE_2D, aoTex);
+        glUniform1i(glGetUniformLocation(terProg, "uAOMap"), 9);
         glUniform1f(glGetUniformLocation(terProg, "uGrassAO"), groundAO);
+        glUniform1f(glGetUniformLocation(terProg, "uGrassAORad"), aoRadius);
+        glUniform1f(glGetUniformLocation(terProg, "uShadowStr"),
+                    shadowStrength);
         glUniformMatrix4fv(glGetUniformLocation(terProg, "uLightMvp"), 1,
                            GL_FALSE, lightMvp.m);
         glUniform1i(glGetUniformLocation(terProg, "uShadowsOn"),
@@ -2400,6 +2483,8 @@ int main(int argc, char** argv)
                                1, GL_FALSE, lightMvp.m);
             glUniform1i(glGetUniformLocation(propProg, "uShadowsOn"),
                         shadowsOn ? 1 : 0);
+            glUniform1f(glGetUniformLocation(propProg, "uShadowStr"),
+                        shadowStrength);
             glActiveTexture(GL_TEXTURE0);
             glUniform1i(glGetUniformLocation(propProg, "uTex"), 0);
             GLint locModel = glGetUniformLocation(propProg, "uModel");
@@ -2614,7 +2699,9 @@ int main(int argc, char** argv)
                     ImGui::SliderFloat("Shadow Dark", &grassShadowDark,
                                        0.2f, 1.0f, "%.2f");
                     ImGui::SliderFloat("Ground AO", &groundAO,
-                                       0.0f, 0.6f, "%.2f");
+                                       0.0f, 0.8f, "%.2f");
+                    ImGui::SliderFloat("AO Radius", &aoRadius,
+                                       0.0f, 6.0f, "%.1f");
                     brushGallery();
                     ImGui::SliderFloat("Strength", &brushStrength,
                                        0.1f, 3.0f, "%.1f");
@@ -2776,6 +2863,8 @@ int main(int argc, char** argv)
                         applySettingsIn();
                     }
                     ImGui::Checkbox("Shadows", &shadowsOn);
+                    ImGui::SliderFloat("Sun Shadow Intensity",
+                                       &shadowStrength, 0.0f, 1.0f, "%.2f");
                     ImGui::SeparatorText("File");
                     if (ImGui::Button("Export Map..."))
                         SDL_ShowSaveFileDialog(map_dialog_cb, (void*)1, win,
