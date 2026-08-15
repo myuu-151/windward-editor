@@ -21,6 +21,9 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include "gl_loader.h"
+#include "imgui.h"
+#include "imgui_impl_sdl3.h"
+#include "imgui_impl_opengl3.h"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -202,17 +205,6 @@ void main() {
     vec3 col = mix(root, tip, vV * vV);
     fragColor = vec4(col, 1.0);
 }
-)";
-
-// flat-color 2D quads for the toolbar
-static const char* HUD_VS = R"(#version 330 core
-layout(location = 0) in vec2 aNdc;
-void main() { gl_Position = vec4(aNdc, 0.0, 1.0); }
-)";
-static const char* HUD_FS = R"(#version 330 core
-out vec4 fragColor;
-uniform vec4 uColor;
-void main() { fragColor = uColor; }
 )";
 
 // procedural sky (flat-white cloud variant, same as sky/water demos)
@@ -450,48 +442,26 @@ static bool ray_terrain(const float ro[3], const float rd[3], float out[3])
     return false;
 }
 
-enum BrushMode { BRUSH_RAISE, BRUSH_SMOOTH, BRUSH_DIRT, BRUSH_GRASS };
+enum BrushMode { BRUSH_RAISE, BRUSH_SMOOTH, BRUSH_FLATTEN, BRUSH_DIRT, BRUSH_GRASS };
 
-static const float kBrushColors[4][3] = {
+static const float kBrushColors[5][3] = {
     { 1.0f, 0.85f, 0.3f },   // raise: yellow
     { 0.4f, 0.8f, 1.0f },    // smooth: blue
+    { 0.9f, 0.5f, 0.9f },    // flatten: purple
     { 0.72f, 0.5f, 0.28f },  // dirt: brown
     { 0.5f, 1.0f, 0.4f },    // grass: green
 };
-static const char* kBrushNames[4] = { "raise", "smooth", "dirt", "grass" };
+static const char* kBrushNames[5] = { "Sculpt", "Smooth", "Flatten",
+                                      "Paint Dirt", "Paint Grass" };
 
-// toolbar layout in pixels
-static const float kBtn = 44.0f, kBtnPad = 8.0f, kBtnX0 = 12.0f, kBtnY0 = 12.0f;
-
-static int hud_hit(float mx, float my)
-{
-    for (int i = 0; i < 4; i++) {
-        float x = kBtnX0 + i * (kBtn + kBtnPad);
-        if (mx >= x && mx <= x + kBtn && my >= kBtnY0 && my <= kBtnY0 + kBtn)
-            return i;
-    }
-    return -1;
-}
-
-static void hud_rect(GLuint prog, GLuint vbo, int winW, int winH,
-                     float x, float y, float w, float h, const float col[3],
-                     float alpha)
-{
-    float x0 = 2.0f * x / winW - 1.0f;
-    float x1 = 2.0f * (x + w) / winW - 1.0f;
-    float y0 = 1.0f - 2.0f * y / winH;
-    float y1 = 1.0f - 2.0f * (y + h) / winH;
-    const float v[12] = { x0, y0, x1, y0, x0, y1, x1, y0, x1, y1, x0, y1 };
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof v, v, GL_STREAM_DRAW);
-    glUniform4f(glGetUniformLocation(prog, "uColor"), col[0], col[1], col[2], alpha);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-}
+// flatten pulls terrain toward the height captured when the stroke began
+static float gFlattenTarget = 0.0f;
 
 static void apply_brush(BrushMode mode, float cx, float cz, float radius,
-                        float dt, bool invert)
+                        float dt, bool invert, float strength = 1.0f)
 {
-    if (mode == BRUSH_RAISE || mode == BRUSH_SMOOTH) {
+    dt *= strength;
+    if (mode == BRUSH_RAISE || mode == BRUSH_SMOOTH || mode == BRUSH_FLATTEN) {
         float cell = 2.0f * TER_HALF / (HN - 1);
         int i0 = SDL_clamp((int)((cx - radius + TER_HALF) / cell), 0, HN - 1);
         int i1 = SDL_clamp((int)((cx + radius + TER_HALF) / cell) + 1, 0, HN - 1);
@@ -512,6 +482,8 @@ static void apply_brush(BrushMode mode, float cx, float cz, float radius,
                 float& h = gHeights[j * HN + i];
                 if (mode == BRUSH_RAISE) {
                     h += (invert ? -1.0f : 1.0f) * 3.5f * w * dt;
+                } else if (mode == BRUSH_FLATTEN) {
+                    h += (gFlattenTarget - h) * SDL_min(1.0f, 12.0f * w * dt);
                 } else {
                     float sum = 0.0f;
                     int n = 0;
@@ -658,10 +630,16 @@ int main(int argc, char** argv)
         return 1;
     SDL_GL_SetSwapInterval(1);
 
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGui::StyleColorsDark();
+    ImGui::GetStyle().WindowRounding = 6.0f;
+    ImGui_ImplSDL3_InitForOpenGL(win, ctx);
+    ImGui_ImplOpenGL3_Init("#version 330");
+
     GLuint terProg = make_program(TER_VS, TER_FS);
     GLuint grassProg = make_program(GRASS_VS, GRASS_FS);
     GLuint skyProg = make_program(SKY_VS, SKY_FS);
-    GLuint hudProg = make_program(HUD_VS, HUD_FS);
 
     // asset textures live next to the exe's source tree
     char base[512];
@@ -781,22 +759,14 @@ int main(int argc, char** argv)
     GLuint emptyVao = 0;
     glGenVertexArrays(1, &emptyVao);
 
-    // HUD quad buffer
-    GLuint hudVao = 0, hudVbo = 0;
-    glGenVertexArrays(1, &hudVao);
-    glGenBuffers(1, &hudVbo);
-    glBindVertexArray(hudVao);
-    glBindBuffer(GL_ARRAY_BUFFER, hudVbo);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
-    glBindVertexArray(0);
-
     // camera + editor state
     float yaw = 0.0f, pitch = -0.42f, fov = 55.0f;
     float camPos[3] = { 0.0f, 12.0f, 30.0f };
     float brushRadius = 2.5f;
+    float brushStrength = 1.0f;
     BrushMode mode = BRUSH_RAISE;
     bool showGrass = true;
+    bool wasPainting = false;
     bool running = true;
     double simTime = 0.0;
     int frame = 0;
@@ -821,6 +791,7 @@ int main(int argc, char** argv)
     while (running) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
+            ImGui_ImplSDL3_ProcessEvent(&e);
             switch (e.type) {
             case SDL_EVENT_QUIT:
                 running = false;
@@ -829,18 +800,16 @@ int main(int argc, char** argv)
                 if (e.key.key == SDLK_ESCAPE) running = false;
                 if (e.key.key == SDLK_1) mode = BRUSH_RAISE;
                 if (e.key.key == SDLK_2) mode = BRUSH_SMOOTH;
+                if (e.key.key == SDLK_5) mode = BRUSH_FLATTEN;
                 if (e.key.key == SDLK_3) mode = BRUSH_DIRT;
                 if (e.key.key == SDLK_4) mode = BRUSH_GRASS;
                 if (e.key.key == SDLK_G) showGrass = !showGrass;
                 if (e.key.key == SDLK_F5) save_map(mapPath);
                 if (e.key.key == SDLK_F9) load_map(mapPath);
-                break;
-            case SDL_EVENT_MOUSE_BUTTON_DOWN:
-                if (e.button.button == SDL_BUTTON_LEFT) {
-                    int hitBtn = hud_hit(e.button.x, e.button.y);
-                    if (hitBtn >= 0)
-                        mode = (BrushMode)hitBtn;
-                }
+                if (e.key.key == SDLK_LEFTBRACKET)
+                    brushRadius = SDL_max(0.4f, brushRadius - 0.4f);
+                if (e.key.key == SDLK_RIGHTBRACKET)
+                    brushRadius = SDL_min(10.0f, brushRadius + 0.4f);
                 break;
             case SDL_EVENT_MOUSE_MOTION:
                 if (e.motion.state & SDL_BUTTON_RMASK) {
@@ -850,10 +819,16 @@ int main(int argc, char** argv)
                 }
                 break;
             case SDL_EVENT_MOUSE_WHEEL:
-                brushRadius = SDL_clamp(brushRadius + e.wheel.y * 0.3f, 0.4f, 10.0f);
+                if (!ImGui::GetIO().WantCaptureMouse)
+                    brushRadius = SDL_clamp(brushRadius + e.wheel.y * 0.3f,
+                                            0.4f, 10.0f);
                 break;
             }
         }
+
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui_ImplSDL3_NewFrame();
+        ImGui::NewFrame();
 
         Uint64 now = SDL_GetTicksNS();
         float dt = (float)((double)(now - prev) * 1e-9);
@@ -909,11 +884,16 @@ int main(int argc, char** argv)
             float len = sqrtf(rd[0] * rd[0] + rd[1] * rd[1] + rd[2] * rd[2]);
             rd[0] /= len; rd[1] /= len; rd[2] /= len;
             hasHit = ray_terrain(camPos, rd, hit);
-            if (hud_hit(mxp, myp) >= 0)
-                hasHit = false;   // cursor over toolbar: never paint through it
-            if (hasHit && (mb & SDL_BUTTON_LMASK) && !shotPath)
+            if (ImGui::GetIO().WantCaptureMouse)
+                hasHit = false;   // cursor over the panel: never paint through
+            bool painting = hasHit && (mb & SDL_BUTTON_LMASK) && !shotPath;
+            if (painting) {
+                if (!wasPainting && mode == BRUSH_FLATTEN)
+                    gFlattenTarget = height_at(hit[0], hit[2]);
                 apply_brush(mode, hit[0], hit[2], brushRadius, dt,
-                            keys[SDL_SCANCODE_LSHIFT] != 0);
+                            keys[SDL_SCANCODE_LSHIFT] != 0, brushStrength);
+            }
+            wasPainting = painting;
         }
 
         upload_dirty();
@@ -988,46 +968,53 @@ int main(int argc, char** argv)
         glDrawArrays(GL_TRIANGLES, 0, 3);
         glDepthMask(GL_TRUE);
 
-        // toolbar: four brush buttons (white frame = active) + size bar
+        // tool panel
         if (!shotPath) {
-            glDisable(GL_DEPTH_TEST);
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            glUseProgram(hudProg);
-            glBindVertexArray(hudVao);
-            const float panel[3] = { 0.10f, 0.12f, 0.14f };
-            const float white[3] = { 1.0f, 1.0f, 1.0f };
-            hud_rect(hudProg, hudVbo, w, h, kBtnX0 - 6, kBtnY0 - 6,
-                     4 * kBtn + 3 * kBtnPad + 12, kBtn + 30, panel, 0.55f);
-            for (int i = 0; i < 4; i++) {
-                float x = kBtnX0 + i * (kBtn + kBtnPad);
-                if ((int)mode == i)
-                    hud_rect(hudProg, hudVbo, w, h, x - 3, kBtnY0 - 3,
-                             kBtn + 6, kBtn + 6, white, 1.0f);
-                hud_rect(hudProg, hudVbo, w, h, x, kBtnY0, kBtn, kBtn,
-                         kBrushColors[i], 1.0f);
-            }
-            // brush size bar under the buttons
-            float frac = (brushRadius - 0.4f) / (10.0f - 0.4f);
-            hud_rect(hudProg, hudVbo, w, h, kBtnX0, kBtnY0 + kBtn + 8,
-                     4 * kBtn + 3 * kBtnPad, 6, panel, 0.9f);
-            hud_rect(hudProg, hudVbo, w, h, kBtnX0, kBtnY0 + kBtn + 8,
-                     (4 * kBtn + 3 * kBtnPad) * frac, 6, white, 0.9f);
-            glDisable(GL_BLEND);
-            glEnable(GL_DEPTH_TEST);
-        }
+            ImGui::SetNextWindowPos(ImVec2(12, 12), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(ImVec2(240, 0), ImGuiCond_FirstUseEver);
+            ImGui::Begin("Landscape", nullptr, ImGuiWindowFlags_NoCollapse);
 
-        // window title doubles as the status line
-        static int titleTick = 0;
-        if (++titleTick % 15 == 0) {
-            char title[128];
-            SDL_snprintf(title, sizeof title,
-                         "terrain editor - %s  radius %.1f%s",
-                         kBrushNames[mode], brushRadius,
-                         keys[SDL_SCANCODE_LSHIFT] && mode == BRUSH_RAISE
-                             ? "  (lowering)" : "");
-            SDL_SetWindowTitle(win, title);
+            ImGui::SeparatorText("Sculpt");
+            for (int i = 0; i <= BRUSH_FLATTEN; i++) {
+                ImGui::PushStyleColor(ImGuiCol_Text,
+                    ImVec4(kBrushColors[i][0], kBrushColors[i][1],
+                           kBrushColors[i][2], 1.0f));
+                if (ImGui::RadioButton(kBrushNames[i], (int)mode == i))
+                    mode = (BrushMode)i;
+                ImGui::PopStyleColor();
+            }
+            if (mode == BRUSH_RAISE)
+                ImGui::TextDisabled("hold Shift to lower");
+
+            ImGui::SeparatorText("Paint");
+            for (int i = BRUSH_DIRT; i <= BRUSH_GRASS; i++) {
+                ImGui::PushStyleColor(ImGuiCol_Text,
+                    ImVec4(kBrushColors[i][0], kBrushColors[i][1],
+                           kBrushColors[i][2], 1.0f));
+                if (ImGui::RadioButton(kBrushNames[i], (int)mode == i))
+                    mode = (BrushMode)i;
+                ImGui::PopStyleColor();
+            }
+
+            ImGui::SeparatorText("Brush");
+            ImGui::SliderFloat("Radius", &brushRadius, 0.4f, 10.0f, "%.1f");
+            ImGui::SliderFloat("Strength", &brushStrength, 0.1f, 3.0f, "%.1f");
+
+            ImGui::SeparatorText("View");
+            ImGui::Checkbox("Grass", &showGrass);
+
+            ImGui::SeparatorText("Map");
+            if (ImGui::Button("Save (F5)"))
+                save_map(mapPath);
+            ImGui::SameLine();
+            if (ImGui::Button("Load (F9)"))
+                load_map(mapPath);
+
+            ImGui::TextDisabled("RMB look  WASD/QE fly  [ ] size");
+            ImGui::End();
         }
+        ImGui::Render();
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
         SDL_GL_SwapWindow(win);
 
@@ -1037,6 +1024,9 @@ int main(int argc, char** argv)
         }
     }
 
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplSDL3_Shutdown();
+    ImGui::DestroyContext();
     SDL_GL_DestroyContext(ctx);
     SDL_DestroyWindow(win);
     SDL_Quit();
