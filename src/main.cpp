@@ -1051,8 +1051,16 @@ int main(int argc, char** argv)
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
-    ImGui::StyleColorsDark();
-    ImGui::GetStyle().WindowRounding = 6.0f;
+    float uiScale = 1.5f;
+    auto applyUiScale = [&uiScale]() {
+        ImGuiStyle s;
+        ImGui::StyleColorsDark(&s);
+        s.WindowRounding = 6.0f;
+        s.ScaleAllSizes(uiScale);
+        ImGui::GetStyle() = s;
+        ImGui::GetIO().FontGlobalScale = uiScale;
+    };
+    applyUiScale();
     ImGui_ImplSDL3_InitForOpenGL(win, ctx);
     ImGui_ImplOpenGL3_Init("#version 330");
 
@@ -1451,7 +1459,7 @@ int main(int argc, char** argv)
         // tool panel
         if (!shotPath) {
             // docked inspector: pinned to the right edge, full height
-            const float panelW = 320.0f;
+            const float panelW = 320.0f * uiScale;
             ImGui::SetNextWindowPos(ImVec2((float)w - panelW, 0.0f));
             ImGui::SetNextWindowSize(ImVec2(panelW, (float)h));
             ImGui::Begin("Terrain", nullptr,
@@ -1476,7 +1484,7 @@ int main(int argc, char** argv)
                     ImGui::PushID(i);
                     if (ImGui::ImageButton("stamp",
                             (ImTextureID)(intptr_t)gStamps[i].tex,
-                            ImVec2(40, 40)))
+                            ImVec2(40 * uiScale, 40 * uiScale)))
                         gStamp = i;
                     if (ImGui::IsItemHovered())
                         ImGui::SetTooltip("%s", gStamps[i].name.c_str());
@@ -1531,7 +1539,7 @@ int main(int argc, char** argv)
                         ImGui::PushID(100 + i);
                         if (ImGui::ImageButton("layer",
                                 (ImTextureID)(intptr_t)layers[i].tex,
-                                ImVec2(48, 48)))
+                                ImVec2(48 * uiScale, 48 * uiScale)))
                             paintLayer = i;
                         if (ImGui::IsItemHovered())
                             ImGui::SetTooltip("%s", layers[i].name);
@@ -1576,6 +1584,9 @@ int main(int argc, char** argv)
                     ImGui::SameLine();
                     if (ImGui::Button("Load (F9)"))
                         load_map(mapPath);
+                    if (ImGui::SliderFloat("UI Scale", &uiScale,
+                                           1.0f, 2.5f, "%.1f"))
+                        applyUiScale();
                     ImGui::TextDisabled("RMB look  WASD/QE fly  [ ] size");
                     ImGui::EndTabItem();
                 }
