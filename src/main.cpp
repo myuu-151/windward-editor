@@ -227,13 +227,13 @@ out vec4 fragColor;
 uniform sampler2D uGrassTex;
 
 void main() {
-    // blades take the LOCAL AVERAGE ground color (high mip = blurred), so
-    // they never pick up single flower/shadow pixels, and the root matches
-    // the ground almost exactly -- blades grow out of the floor instead of
-    // sitting on it
+    // original blade gradient: dark root, bright tip -- but sampled from
+    // the blurred ground (high mip) so single flower pixels still can't
+    // turn blades into confetti
     vec3 groundCol = textureLod(uGrassTex, vWorldXz * 0.16, 4.5).rgb;
-    vec3 tip  = groundCol * (1.16 + vSeed * 0.08);
-    vec3 col = mix(groundCol * 0.94, tip, vV * vV);
+    vec3 root = groundCol * 0.55;
+    vec3 tip  = groundCol * (1.15 + vSeed * 0.15);
+    vec3 col = mix(root, tip, vV * vV);
     fragColor = vec4(col, 1.0);
 }
 )";
