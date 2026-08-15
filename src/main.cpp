@@ -935,6 +935,34 @@ static void do_redo()
     mark_all_dirty();
 }
 
+static float cpu_vnoise(float x, float y);
+
+// Sink the map's rim below the waterline so the island ends in sea
+// instead of a square plateau: a noisy radial falloff from the edge.
+// (A square of land casts a square shadow and gets no foam ring.)
+static void taper_edges_to_sea(float widthFrac, float seaLevel)
+{
+    const float cell = 2.0f * TER_HALF / (HN - 1);
+    for (int j = 0; j < HN; j++)
+        for (int i = 0; i < HN; i++) {
+            float x = -TER_HALF + cell * i;
+            float z = -TER_HALF + cell * j;
+            // distance from the rim, normalized: 0 at the border
+            float dx = 1.0f - fabsf(x) / TER_HALF;
+            float dz = 1.0f - fabsf(z) / TER_HALF;
+            float edge = SDL_min(dx, dz) / SDL_max(0.02f, widthFrac);
+            // wobble the shoreline so it never reads as a straight cut
+            edge += (cpu_vnoise(x * 0.09f, z * 0.09f) - 0.5f) * 0.55f +
+                    (cpu_vnoise(x * 0.31f, z * 0.31f) - 0.5f) * 0.22f;
+            float t = SDL_clamp(edge, 0.0f, 1.0f);
+            t = t * t * (3.0f - 2.0f * t);
+            float& h = gHeights[j * HN + i];
+            // below the sea by a good margin at the border, untouched inland
+            h = h * t + (seaLevel - 4.0f) * (1.0f - t);
+        }
+    gHeightsDirty = true;
+}
+
 // flatten pulls terrain toward the height captured when the stroke began
 static float gFlattenTarget = 0.0f;
 
@@ -2323,6 +2351,7 @@ int main(int argc, char** argv)
     float islandDepth = 0.0f;        // skirt extrusion below the terrain
     float islandFrill = 0.0f;        // scalloped underside silhouette
     float islandBulge = 0.0f;        // underside pushed outward past rim
+    float shoreWidth = 0.22f;        // rim fraction tapered into the sea
     // prop tools
     int activeTab = 0;          // 0 sculpt, 1 paint, 2 details, 3 props
     int sculptTool = 0, paintLayer = 0, detailTool = 0;
@@ -3062,6 +3091,15 @@ int main(int argc, char** argv)
                                        0.0f, 1.0f, "%.2f");
                     ImGui::SliderFloat("Island Bulge", &islandBulge,
                                        0.0f, 1.0f, "%.2f");
+                    ImGui::SeparatorText("Shoreline");
+                    ImGui::SliderFloat("Shore Width", &shoreWidth,
+                                       0.05f, 0.6f, "%.2f");
+                    if (ImGui::Button("Taper Edges to Sea")) {
+                        push_undo();
+                        taper_edges_to_sea(shoreWidth, gWaterline);
+                    }
+                    ImGui::TextDisabled("sinks the rim below the waterline\n"
+                                        "so the island ends in water");
                     ImGui::SeparatorText("Scale Reference");
                     if (ImGui::Checkbox("Link Dummy", &showDummy) &&
                         showDummy) {
