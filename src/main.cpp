@@ -413,6 +413,69 @@ void main() {
 }
 )";
 
+// Outer extension: terrain generated BEYOND the map bounds, continuing
+// each border height outward with fractal noise and sinking into the
+// sea. A heightmap cannot be pulled sideways, so growing new topology
+// past the rim is how an island gains an organic coast without losing
+// any of the sculpted interior.
+static const char* EXT_VS = R"(#version 330 core
+layout(location = 0) in vec2 aBorder;   // point on the map rim
+layout(location = 1) in vec2 aDir;      // outward normal at that point
+layout(location = 2) in float aT;       // 0 at the rim .. 1 outermost
+uniform mat4  uMvp;
+uniform sampler2D uHeight;
+uniform float uHalf;
+uniform float uDist;      // how far out the land reaches
+uniform float uNoise;     // coastline raggedness
+uniform float uSea;       // waterline
+uniform float uDrop;      // depth below the waterline at the outer edge
+out vec3 vWorld;
+out vec3 vNormal;
+
+float hash(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+float vnoise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash(i), hash(i + vec2(1, 0)), u.x),
+               mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), u.x), u.y);
+}
+float fbm2(vec2 p) {
+    float v = 0.0, a = 0.5;
+    for (int i = 0; i < 4; i++) { v += a * vnoise(p); p *= 2.03; a *= 0.5; }
+    return v;
+}
+
+// world position + height for a (border, t) sample
+vec3 ext_point(vec2 border, vec2 dir, float t) {
+    // ragged reach: some stretches run out further than others
+    float reach = uDist * (1.0 + (fbm2(border * 0.10) - 0.5) * 1.4 * uNoise);
+    vec2 xz = border + dir * t * reach;
+    vec2 uv = (border + vec2(uHalf)) / (2.0 * uHalf);
+    float edgeH = texture(uHeight, uv).r;
+    // fall from the rim height into the sea, with terrain detail on top
+    float s = t * t * (3.0 - 2.0 * t);
+    float h = mix(edgeH, uSea - uDrop, s);
+    h += (fbm2(xz * 0.16) - 0.5) * 2.2 * uNoise * (1.0 - t) * (t + 0.15);
+    return vec3(xz.x, h, xz.y);
+}
+
+void main() {
+    vec3 p = ext_point(aBorder, aDir, aT);
+    // normal from neighbouring samples of the same generator
+    vec2 tang = vec2(-aDir.y, aDir.x);
+    vec3 pu = ext_point(aBorder + tang * 0.35, aDir, aT);
+    vec3 pv = ext_point(aBorder, aDir, min(aT + 0.02, 1.0));
+    vNormal = normalize(cross(pv - p, pu - p));
+    if (vNormal.y < 0.0) vNormal = -vNormal;
+    vWorld = p;
+    gl_Position = uMvp * vec4(p, 1.0);
+}
+)";
+
 // island skirt: the terrain rim extruded down into a rocky underside
 static const char* SKIRT_VS = R"(#version 330 core
 layout(location = 0) in vec3 aData;   // x, z, t (0 rim, 1 bottom, 2 center)
@@ -2332,6 +2395,68 @@ int main(int argc, char** argv)
         glBindVertexArray(0);
     }
 
+    // outer extension: perimeter x outward steps, placed by the shader
+    GLuint extProg = make_program(EXT_VS, TER_FS);
+    GLuint extVao = 0, extVbo = 0, extIbo = 0;
+    GLsizei extIdxCount = 0;
+    {
+        const int P = 256;      // points around the rim
+        const int M = 24;       // outward steps
+        std::vector<float> ev;  // borderX, borderZ, dirX, dirZ, t
+        auto push = [&ev](float bx, float bz, float t) {
+            float dx = 0.0f, dz = 0.0f;
+            if (fabsf(fabsf(bx) - TER_HALF) < 0.001f) dx = bx > 0 ? 1.0f : -1.0f;
+            if (fabsf(fabsf(bz) - TER_HALF) < 0.001f) dz = bz > 0 ? 1.0f : -1.0f;
+            float l = sqrtf(dx * dx + dz * dz);
+            if (l > 0.0f) { dx /= l; dz /= l; }
+            ev.insert(ev.end(), { bx, bz, dx, dz, t });
+        };
+        std::vector<float> ring;
+        for (int i = 0; i < P / 4; i++)
+            ring.insert(ring.end(),
+                { -TER_HALF + 2.0f * TER_HALF * i / (P / 4), -TER_HALF });
+        for (int i = 0; i < P / 4; i++)
+            ring.insert(ring.end(),
+                { TER_HALF, -TER_HALF + 2.0f * TER_HALF * i / (P / 4) });
+        for (int i = P / 4; i > 0; i--)
+            ring.insert(ring.end(),
+                { -TER_HALF + 2.0f * TER_HALF * i / (P / 4), TER_HALF });
+        for (int i = P / 4; i > 0; i--)
+            ring.insert(ring.end(),
+                { -TER_HALF, -TER_HALF + 2.0f * TER_HALF * i / (P / 4) });
+        const int RP = (int)ring.size() / 2;
+        for (int p = 0; p < RP; p++)
+            for (int m = 0; m <= M; m++)
+                push(ring[p * 2], ring[p * 2 + 1], (float)m / M);
+        std::vector<unsigned> ei;
+        for (int p = 0; p < RP; p++) {
+            int pn = (p + 1) % RP;
+            for (int m = 0; m < M; m++) {
+                unsigned a = p * (M + 1) + m, b = a + 1;
+                unsigned c = pn * (M + 1) + m, d = c + 1;
+                ei.insert(ei.end(), { a, b, c, c, b, d });
+            }
+        }
+        extIdxCount = (GLsizei)ei.size();
+        glGenVertexArrays(1, &extVao);
+        glGenBuffers(1, &extVbo);
+        glGenBuffers(1, &extIbo);
+        glBindVertexArray(extVao);
+        glBindBuffer(GL_ARRAY_BUFFER, extVbo);
+        glBufferData(GL_ARRAY_BUFFER, ev.size() * sizeof(float), ev.data(),
+                     GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, extIbo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, ei.size() * sizeof(unsigned),
+                     ei.data(), GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 20, (void*)0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 20, (void*)8);
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, 20, (void*)16);
+        glBindVertexArray(0);
+    }
+
     // island skirt geometry: perimeter ring (rim + bottom verts) + cap
     GLuint skirtProg = make_program(SKIRT_VS, SKIRT_FS);
     GLuint skirtVao = 0, skirtVbo = 0, skirtIbo = 0;
@@ -2391,6 +2516,9 @@ int main(int argc, char** argv)
     float bladeDensity = 0.8f;
     bool showGrass = true;
     bool shadowsOn = true;
+    // generated land beyond the map bounds
+    bool extendOn = false;
+    float extendDist = 10.0f, extendNoise = 0.6f, extendDrop = 3.0f;
     bool showDummy = false;             // Link-scale reference figure
     bool dummyMarker = true;            // tall pole so he is findable
     float dummyPos[2] = { 0.0f, 0.0f }; // placed with the brush cursor
@@ -2912,6 +3040,62 @@ int main(int argc, char** argv)
         glBindVertexArray(terVao);
         glDrawElements(GL_TRIANGLES, (GLsizei)idx.size(), GL_UNSIGNED_INT, nullptr);
 
+        // generated land beyond the map bounds
+        if (extendOn) {
+            glUseProgram(extProg);
+            glUniformMatrix4fv(glGetUniformLocation(extProg, "uMvp"), 1,
+                               GL_FALSE, mvp.m);
+            glUniform1f(glGetUniformLocation(extProg, "uHalf"), TER_HALF);
+            glUniform1f(glGetUniformLocation(extProg, "uDist"), extendDist);
+            glUniform1f(glGetUniformLocation(extProg, "uNoise"), extendNoise);
+            glUniform1f(glGetUniformLocation(extProg, "uSea"), gWaterline);
+            glUniform1f(glGetUniformLocation(extProg, "uDrop"), extendDrop);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, gHeightTex);
+            glUniform1i(glGetUniformLocation(extProg, "uHeight"), 0);
+            // same painted materials as the terrain proper
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, gMaskTex);
+            glUniform1i(glGetUniformLocation(extProg, "uMask"), 1);
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, grassTex);
+            glUniform1i(glGetUniformLocation(extProg, "uGrassTex"), 2);
+            glActiveTexture(GL_TEXTURE3);
+            glBindTexture(GL_TEXTURE_2D, dirtTex);
+            glUniform1i(glGetUniformLocation(extProg, "uDirtTex"), 3);
+            glActiveTexture(GL_TEXTURE4);
+            glBindTexture(GL_TEXTURE_2D, cliffTex);
+            glUniform1i(glGetUniformLocation(extProg, "uCliffTex"), 4);
+            glActiveTexture(GL_TEXTURE5);
+            glBindTexture(GL_TEXTURE_2D, gMask2Tex);
+            glUniform1i(glGetUniformLocation(extProg, "uMask2"), 5);
+            glActiveTexture(GL_TEXTURE6);
+            glBindTexture(GL_TEXTURE_2D, dirt2Tex);
+            glUniform1i(glGetUniformLocation(extProg, "uDirt2Tex"), 6);
+            glActiveTexture(GL_TEXTURE8);
+            glBindTexture(GL_TEXTURE_2D, shadowTex);
+            glUniform1i(glGetUniformLocation(extProg, "uShadowMap"), 8);
+            glUniformMatrix4fv(glGetUniformLocation(extProg, "uLightMvp"), 1,
+                               GL_FALSE, lightMvp.m);
+            glUniform1i(glGetUniformLocation(extProg, "uShadowsOn"),
+                        shadowsOn ? 1 : 0);
+            glUniform1f(glGetUniformLocation(extProg, "uShadowStr"),
+                        shadowStrength);
+            glUniform1f(glGetUniformLocation(extProg, "uEdgeBreak"),
+                        edgeBreak);
+            glUniform1f(glGetUniformLocation(extProg, "uGrassAO"), 0.0f);
+            glUniform1f(glGetUniformLocation(extProg, "uGrassAORad"), 0.0f);
+            glActiveTexture(GL_TEXTURE9);
+            glBindTexture(GL_TEXTURE_2D, aoTex);
+            glUniform1i(glGetUniformLocation(extProg, "uAOMap"), 9);
+            float noBrush[4] = { 0, 0, 1, 0 };
+            glUniform4fv(glGetUniformLocation(extProg, "uBrush"), 1, noBrush);
+            glDisable(GL_CULL_FACE);
+            glBindVertexArray(extVao);
+            glDrawElements(GL_TRIANGLES, extIdxCount, GL_UNSIGNED_INT,
+                           nullptr);
+        }
+
         // island skirt underside
         if (islandDepth > 0.05f) {
             glUseProgram(skirtProg);
@@ -3176,6 +3360,18 @@ int main(int argc, char** argv)
                     }
                     if (shoreDirty)
                         apply_shoreline(gWaterline);
+                    ImGui::SeparatorText("Outer Extension");
+                    ImGui::Checkbox("Extend Land Outward", &extendOn);
+                    if (extendOn) {
+                        ImGui::SliderFloat("Reach", &extendDist,
+                                           1.0f, 30.0f, "%.1f");
+                        ImGui::SliderFloat("Ragged", &extendNoise,
+                                           0.0f, 1.5f, "%.2f");
+                        ImGui::SliderFloat("Sink", &extendDrop,
+                                           0.3f, 10.0f, "%.1f");
+                        ImGui::TextDisabled("grows new coast past the map\n"
+                                            "edge -- keeps your sculpt whole");
+                    }
                     ImGui::SeparatorText("Scale Reference");
                     if (ImGui::Checkbox("Link Dummy", &showDummy) &&
                         showDummy) {
