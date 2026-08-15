@@ -28,6 +28,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <string>
 #include <vector>
 
 // world extent: the ground is 2*TER_HALF on a side
@@ -502,7 +504,7 @@ static float gFlattenTarget = 0.0f;
 // Unity-style alpha-stamp brushes: each brush is a little grayscale image;
 // painting stamps its opacity. Generated procedurally at startup.
 struct BrushStamp {
-    const char* name;
+    std::string name;
     std::vector<float> alpha;   // STAMP_N x STAMP_N, 0..1
     unsigned tex = 0;           // GL texture for the gallery thumbnail
 };
@@ -677,6 +679,53 @@ static void make_stamps()
     add("Star", star, 0);
     add("Star 6", star6, 0);
     add("Star Ring", starring, 0);
+}
+
+// grayscale BMPs in assets/brushes/ become stamps too (e.g. the real
+// Unity built-in brushes exported from the editor)
+static void load_stamp_files(const char* dir)
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    std::vector<fs::path> paths;
+    for (const auto& e : fs::directory_iterator(dir, ec))
+        if (e.path().extension() == ".bmp")
+            paths.push_back(e.path());
+    std::sort(paths.begin(), paths.end());
+    for (const auto& p : paths) {
+        SDL_Surface* raw = SDL_LoadBMP(p.string().c_str());
+        if (!raw)
+            continue;
+        SDL_Surface* s = SDL_ConvertSurface(raw, SDL_PIXELFORMAT_RGB24);
+        SDL_DestroySurface(raw);
+        if (!s)
+            continue;
+        BrushStamp st;
+        st.name = p.stem().string();
+        st.alpha.resize(STAMP_N * STAMP_N);
+        std::vector<unsigned char> rgba(STAMP_N * STAMP_N * 4);
+        const unsigned char* px = (const unsigned char*)s->pixels;
+        for (int y = 0; y < STAMP_N; y++)
+            for (int x = 0; x < STAMP_N; x++) {
+                int sx = x * s->w / STAMP_N;
+                int sy = y * s->h / STAMP_N;
+                unsigned char c = px[sy * s->pitch + sx * 3];
+                st.alpha[y * STAMP_N + x] = c / 255.0f;
+                int i = (y * STAMP_N + x) * 4;
+                rgba[i] = rgba[i + 1] = rgba[i + 2] = c;
+                rgba[i + 3] = 255;
+            }
+        SDL_DestroySurface(s);
+        glGenTextures(1, &st.tex);
+        glBindTexture(GL_TEXTURE_2D, st.tex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, STAMP_N, STAMP_N, 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, rgba.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        gStamps.push_back(st);
+    }
+    SDL_Log("loaded %d brush stamps total", (int)gStamps.size());
 }
 
 static void apply_brush(BrushMode mode, float cx, float cz, float radius,
@@ -908,11 +957,13 @@ int main(int argc, char** argv)
     const char* candidates[] = { "assets/", "../assets/", "../../assets/",
                                  "../../../assets/" };
     GLuint grassTex = 0, dirtTex = 0, dirt2Tex = 0, cliffTex = 0;
+    char assetsDir[700] = { 0 };
     for (const char* c : candidates) {
         char p[600];
         SDL_snprintf(p, sizeof p, "%s%sgrass.bmp", base, c);
         grassTex = load_bmp_texture(p);
         if (grassTex) {
+            SDL_snprintf(assetsDir, sizeof assetsDir, "%s%s", base, c);
             SDL_snprintf(p, sizeof p, "%s%sdirt.bmp", base, c);
             dirtTex = load_bmp_texture(p);
             SDL_snprintf(p, sizeof p, "%s%sdirt2.bmp", base, c);
@@ -925,6 +976,11 @@ int main(int argc, char** argv)
     if (!grassTex || !dirtTex || !dirt2Tex || !cliffTex) {
         SDL_Log("could not find assets/grass|dirt|dirt2|cliff.bmp near exe");
         return 1;
+    }
+    {
+        char brushDir[760];
+        SDL_snprintf(brushDir, sizeof brushDir, "%sbrushes", assetsDir);
+        load_stamp_files(brushDir);
     }
 
     // terrain grid (static xz, heights come from the texture)
@@ -1283,7 +1339,7 @@ int main(int argc, char** argv)
                             ImVec2(40, 40)))
                         gStamp = i;
                     if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("%s", gStamps[i].name);
+                        ImGui::SetTooltip("%s", gStamps[i].name.c_str());
                     ImGui::PopID();
                     if (sel)
                         ImGui::PopStyleColor();
