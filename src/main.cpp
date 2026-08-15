@@ -263,10 +263,12 @@ uniform mat4 uMvp;
 uniform mat4 uModel;
 out vec3 vNorm;
 out vec2 vUv;
+out float vLocalY;
 void main() {
     vec4 world = uModel * vec4(aPos, 1.0);
     vNorm = mat3(uModel) * aNorm;
     vUv = aUv;
+    vLocalY = aPos.y;
     gl_Position = uMvp * world;
 }
 )";
@@ -274,15 +276,23 @@ void main() {
 static const char* PROP_FS = R"(#version 330 core
 in vec3 vNorm;
 in vec2 vUv;
+in float vLocalY;
 out vec4 fragColor;
 uniform sampler2D uTex;
-uniform vec3 uKd;
+uniform vec3 uKd;      // top/main color (the pack's material gradient)
+uniform vec3 uKa;      // bottom color
+uniform float uBoundH; // mesh height for the gradient
 uniform int uHasTex;
+uniform int uGrayMask; // texture is a grayscale mask, not albedo
 void main() {
     vec4 t = uHasTex == 1 ? texture(uTex, vUv) : vec4(1.0);
     if (t.a < 0.5)
         discard;
-    vec3 col = t.rgb * uKd;
+    // the pack colors meshes with a bottom->top material gradient; mask
+    // textures only modulate detail
+    vec3 grad = mix(uKa, uKd, clamp(vLocalY / max(uBoundH, 0.001), 0.0, 1.0));
+    vec3 col = uGrayMask == 1 ? grad * (0.55 + 0.9 * t.r)
+                              : t.rgb * uKd;
     vec3 L = normalize(vec3(0.35, 0.8, -0.45));
     vec3 n = normalize(vNorm);
     float diff = max(dot(n, L), 0.0);
@@ -854,7 +864,9 @@ static void update_stamp_thumbnails()
 
 struct PropMaterial {
     unsigned tex = 0;
-    float kd[3] = { 1, 1, 1 };
+    bool grayMask = false;
+    float kd[3] = { 1, 1, 1 };   // top/main color
+    float ka[3] = { 1, 1, 1 };   // bottom color (gradient)
 };
 struct PropSubmesh {
     int first = 0, count = 0, mat = 0;
@@ -875,11 +887,16 @@ struct PropCategory {
 };
 static std::vector<PropMesh> gPropMeshes;
 static std::vector<PropCategory> gPropCats;
-static std::unordered_map<std::string, unsigned> gPropTexCache;
+struct PropTex {
+    unsigned tex = 0;
+    bool gray = false;
+};
+static std::unordered_map<std::string, PropTex> gPropTexCache;
 static std::string gPropsDir;
 
-// RGBA BMP -> texture (32-bit BMPs keep their alpha for leaf cutouts)
-static unsigned load_bmp_texture_rgba(const char* path)
+// RGBA BMP -> texture (32-bit BMPs keep their alpha for leaf cutouts);
+// grayOut reports whether the image is a grayscale mask (r==g==b)
+static unsigned load_bmp_texture_rgba(const char* path, bool* grayOut = nullptr)
 {
     SDL_Surface* raw = SDL_LoadBMP(path);
     if (!raw)
@@ -888,6 +905,17 @@ static unsigned load_bmp_texture_rgba(const char* path)
     SDL_DestroySurface(raw);
     if (!s)
         return 0;
+    if (grayOut) {
+        bool gray = true;
+        const unsigned char* px = (const unsigned char*)s->pixels;
+        for (int y = 0; y < s->h && gray; y += SDL_max(1, s->h / 32))
+            for (int x = 0; x < s->w && gray; x += SDL_max(1, s->w / 32)) {
+                const unsigned char* p = px + y * s->pitch + x * 4;
+                if (abs(p[0] - p[1]) > 10 || abs(p[1] - p[2]) > 10)
+                    gray = false;
+            }
+        *grayOut = gray;
+    }
     GLuint tex = 0;
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
@@ -903,15 +931,16 @@ static unsigned load_bmp_texture_rgba(const char* path)
     return tex;
 }
 
-static unsigned prop_texture(const std::string& file)
+static PropTex prop_texture(const std::string& file)
 {
     auto it = gPropTexCache.find(file);
     if (it != gPropTexCache.end())
         return it->second;
     std::string full = gPropsDir + "/" + file;
-    unsigned tex = load_bmp_texture_rgba(full.c_str());
-    gPropTexCache[file] = tex;
-    return tex;
+    PropTex pt;
+    pt.tex = load_bmp_texture_rgba(full.c_str(), &pt.gray);
+    gPropTexCache[file] = pt;
+    return pt;
 }
 
 static void load_prop_mtl(PropMesh& m, const std::string& path,
@@ -933,8 +962,15 @@ static void load_prop_mtl(PropMesh& m, const std::string& path,
             m.mats.back().kd[1] = g;
             m.mats.back().kd[2] = b;
         } else if (!m.mats.empty() &&
+                   sscanf(line, "Ka %f %f %f", &r, &g, &b) == 3) {
+            m.mats.back().ka[0] = r;
+            m.mats.back().ka[1] = g;
+            m.mats.back().ka[2] = b;
+        } else if (!m.mats.empty() &&
                    sscanf(line, "map_Kd %255s", name) == 1) {
-            m.mats.back().tex = prop_texture(name);
+            PropTex pt = prop_texture(name);
+            m.mats.back().tex = pt.tex;
+            m.mats.back().grayMask = pt.gray;
         }
     }
     fclose(f);
@@ -1855,7 +1891,10 @@ int main(int argc, char** argv)
             glUniform1i(glGetUniformLocation(propProg, "uTex"), 0);
             GLint locModel = glGetUniformLocation(propProg, "uModel");
             GLint locKd = glGetUniformLocation(propProg, "uKd");
+            GLint locKa = glGetUniformLocation(propProg, "uKa");
+            GLint locBoundH = glGetUniformLocation(propProg, "uBoundH");
             GLint locHasTex = glGetUniformLocation(propProg, "uHasTex");
+            GLint locGray = glGetUniformLocation(propProg, "uGrayMask");
             for (int pi = 0; pi < (int)gProps.size(); pi++) {
                 const PropInst& inst = gProps[pi];
                 PropMesh& pm = gPropMeshes[inst.mesh];
@@ -1864,13 +1903,17 @@ int main(int argc, char** argv)
                 Mat4 mdl = model_trs(inst.x, inst.y, inst.z, inst.yaw,
                                      inst.scale);
                 glUniformMatrix4fv(locModel, 1, GL_FALSE, mdl.m);
+                glUniform1f(locBoundH, pm.boundH);
                 glBindVertexArray(pm.vao);
                 float sel = (pi == selInst && activeTab == 3) ? 1.45f : 1.0f;
                 for (const PropSubmesh& sub : pm.subs) {
                     const PropMaterial& mat = pm.mats[sub.mat];
                     glUniform3f(locKd, mat.kd[0] * sel, mat.kd[1] * sel,
                                 mat.kd[2] * sel);
+                    glUniform3f(locKa, mat.ka[0] * sel, mat.ka[1] * sel,
+                                mat.ka[2] * sel);
                     glUniform1i(locHasTex, mat.tex ? 1 : 0);
+                    glUniform1i(locGray, mat.grayMask ? 1 : 0);
                     if (mat.tex)
                         glBindTexture(GL_TEXTURE_2D, mat.tex);
                     glDrawArrays(GL_TRIANGLES, sub.first, sub.count);
