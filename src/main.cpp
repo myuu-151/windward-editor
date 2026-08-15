@@ -499,21 +499,16 @@ static const char* kBrushNames[8] = { "Sculpt", "Smooth", "Flatten",
 // flatten pulls terrain toward the height captured when the stroke began
 static float gFlattenTarget = 0.0f;
 
-// UE-style brush falloff presets
-enum Falloff { FALLOFF_SMOOTH, FALLOFF_LINEAR, FALLOFF_SPHERE, FALLOFF_TIP };
-static int gFalloff = FALLOFF_SMOOTH;
-static const char* kFalloffNames[] = { "Smooth", "Linear", "Sphere", "Tip" };
-
-static float falloff_weight(float dOverR)
-{
-    float t = SDL_clamp(1.0f - dOverR, 0.0f, 1.0f);
-    switch (gFalloff) {
-    case FALLOFF_LINEAR: return t;
-    case FALLOFF_SPHERE: return sqrtf(SDL_max(0.0f, 1.0f - dOverR * dOverR));
-    case FALLOFF_TIP:    return t * t;
-    default:             return t * t * (3.0f - 2.0f * t);
-    }
-}
+// Unity-style alpha-stamp brushes: each brush is a little grayscale image;
+// painting stamps its opacity. Generated procedurally at startup.
+struct BrushStamp {
+    const char* name;
+    std::vector<float> alpha;   // STAMP_N x STAMP_N, 0..1
+    unsigned tex = 0;           // GL texture for the gallery thumbnail
+};
+static const int STAMP_N = 64;
+static std::vector<BrushStamp> gStamps;
+static int gStamp = 1;   // default: soft round
 
 // grass brush settings: painted density and placement pattern, baked
 // into the density mask so different areas keep different patterns
@@ -553,25 +548,99 @@ static float grass_pattern(float x, float z)
     }
 }
 
-// brush shapes: circle, square, and a speckled "noise" alpha stamp
-enum BrushShape { SHAPE_CIRCLE, SHAPE_SQUARE, SHAPE_NOISE };
-static int gShape = SHAPE_CIRCLE;
-static const char* kShapeNames[] = { "Circle", "Square", "Noise" };
-
-static float brush_weight(float dx, float dz, float radius, float wx, float wz)
+// sample the active stamp's alpha at a brush-space offset (bilinear)
+static float brush_weight(float dx, float dz, float radius, float, float)
 {
-    float d = (gShape == SHAPE_SQUARE)
-                  ? SDL_max(fabsf(dx), fabsf(dz))
-                  : sqrtf(dx * dx + dz * dz);
-    if (d > radius)
+    float u = (dx / radius) * 0.5f + 0.5f;
+    float v = (dz / radius) * 0.5f + 0.5f;
+    if (u < 0.0f || u >= 1.0f || v < 0.0f || v >= 1.0f)
         return 0.0f;
-    float w = falloff_weight(d / radius);
-    if (gShape == SHAPE_NOISE) {
-        float n = sinf(wx * 12.9898f + wz * 78.233f) * 43758.5453f;
-        n -= floorf(n);
-        w *= 0.15f + 0.85f * n * n;
-    }
-    return w;
+    const std::vector<float>& a = gStamps[gStamp].alpha;
+    float fx = u * (STAMP_N - 1), fy = v * (STAMP_N - 1);
+    int ix = (int)fx, iy = (int)fy;
+    float tx = fx - ix, ty = fy - iy;
+    int ix1 = SDL_min(ix + 1, STAMP_N - 1);
+    int iy1 = SDL_min(iy + 1, STAMP_N - 1);
+    float top = a[iy * STAMP_N + ix] * (1 - tx) + a[iy * STAMP_N + ix1] * tx;
+    float bot = a[iy1 * STAMP_N + ix] * (1 - tx) + a[iy1 * STAMP_N + ix1] * tx;
+    return top * (1 - ty) + bot * ty;
+}
+
+// build the default gallery: soft/hard rounds, splotches, hexagon, star
+static void make_stamps()
+{
+    auto add = [](const char* name, float (*f)(float, float, int), int seed) {
+        BrushStamp st;
+        st.name = name;
+        st.alpha.resize(STAMP_N * STAMP_N);
+        std::vector<unsigned char> rgba(STAMP_N * STAMP_N * 4);
+        for (int y = 0; y < STAMP_N; y++)
+            for (int x = 0; x < STAMP_N; x++) {
+                float u = (x + 0.5f) / STAMP_N * 2.0f - 1.0f;
+                float v = (y + 0.5f) / STAMP_N * 2.0f - 1.0f;
+                float a = SDL_clamp(f(u, v, seed), 0.0f, 1.0f);
+                st.alpha[y * STAMP_N + x] = a;
+                unsigned char c = (unsigned char)(a * 255.0f);
+                int i = (y * STAMP_N + x) * 4;
+                rgba[i] = rgba[i + 1] = rgba[i + 2] = c;
+                rgba[i + 3] = 255;
+            }
+        glGenTextures(1, &st.tex);
+        glBindTexture(GL_TEXTURE_2D, st.tex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, STAMP_N, STAMP_N, 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, rgba.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        gStamps.push_back(st);
+    };
+    auto soft = [](float u, float v, int) {
+        float r = sqrtf(u * u + v * v);
+        return expf(-4.5f * r * r) * SDL_clamp(1.0f - (r - 0.85f) / 0.15f, 0.0f, 1.0f);
+    };
+    auto hard = [](float u, float v, int) {
+        float r = sqrtf(u * u + v * v);
+        return SDL_clamp((0.95f - r) / 0.08f, 0.0f, 1.0f);
+    };
+    auto mid = [](float u, float v, int) {
+        float r = sqrtf(u * u + v * v);
+        float t = SDL_clamp(1.0f - r, 0.0f, 1.0f);
+        return t * t * (3.0f - 2.0f * t);
+    };
+    auto tight = [](float u, float v, int) {
+        float r = sqrtf(u * u + v * v);
+        return expf(-10.0f * r * r);
+    };
+    auto splotch = [](float u, float v, int seed) {
+        float r = sqrtf(u * u + v * v);
+        float fall = SDL_clamp(1.0f - r, 0.0f, 1.0f);
+        float n = cpu_vnoise(u * 3.1f + seed * 17.7f, v * 3.1f - seed * 9.3f)
+                * 0.65f
+                + cpu_vnoise(u * 7.9f - seed * 5.1f, v * 7.9f + seed * 12.9f)
+                * 0.35f;
+        return SDL_clamp((n - 0.45f) * 4.0f, 0.0f, 1.0f) * fall * fall * 1.6f;
+    };
+    auto hexagon = [](float u, float v, int) {
+        float ax = fabsf(u), ay = fabsf(v);
+        float d = SDL_max(ax * 0.866025f + ay * 0.5f, ay);
+        return SDL_clamp((0.85f - d) / 0.06f, 0.0f, 1.0f);
+    };
+    auto star = [](float u, float v, int) {
+        float r = sqrtf(u * u + v * v);
+        float th = atan2f(v, u);
+        float edge = 0.35f + 0.5f * fabsf(cosf(2.5f * th));
+        return SDL_clamp((edge - r) / 0.05f, 0.0f, 1.0f);
+    };
+    add("Soft", soft, 0);
+    add("Round", mid, 0);
+    add("Hard", hard, 0);
+    add("Tight", tight, 0);
+    add("Splotch 1", splotch, 1);
+    add("Splotch 2", splotch, 2);
+    add("Splotch 3", splotch, 3);
+    add("Splotch 4", splotch, 4);
+    add("Hexagon", hexagon, 0);
+    add("Star", star, 0);
 }
 
 static void apply_brush(BrushMode mode, float cx, float cz, float radius,
@@ -794,6 +863,7 @@ int main(int argc, char** argv)
     GLuint terProg = make_program(TER_VS, TER_FS);
     GLuint grassProg = make_program(GRASS_VS, GRASS_FS);
     GLuint skyProg = make_program(SKY_VS, SKY_FS);
+    make_stamps();
 
     // asset textures live next to the exe's source tree
     char base[512];
@@ -1154,54 +1224,119 @@ int main(int argc, char** argv)
         // tool panel
         if (!shotPath) {
             ImGui::SetNextWindowPos(ImVec2(12, 12), ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSize(ImVec2(240, 0), ImGuiCond_FirstUseEver);
-            ImGui::Begin("Landscape", nullptr, ImGuiWindowFlags_NoCollapse);
+            ImGui::SetNextWindowSize(ImVec2(320, 0), ImGuiCond_FirstUseEver);
+            ImGui::Begin("Terrain", nullptr, ImGuiWindowFlags_NoCollapse);
 
-            ImGui::SeparatorText("Sculpt");
-            for (int i = 0; i <= BRUSH_FLATTEN; i++) {
-                ImGui::PushStyleColor(ImGuiCol_Text,
-                    ImVec4(kBrushColors[i][0], kBrushColors[i][1],
-                           kBrushColors[i][2], 1.0f));
-                if (ImGui::RadioButton(kBrushNames[i], (int)mode == i))
-                    mode = (BrushMode)i;
-                ImGui::PopStyleColor();
+            static int sculptTool = 0;
+            static int paintLayer = 0;
+            static int detailTool = 0;
+
+            // Unity-style brush gallery + shared size/opacity controls
+            auto brushGallery = [&]() {
+                ImGui::SeparatorText("Brushes");
+                for (int i = 0; i < (int)gStamps.size(); i++) {
+                    if (i % 5)
+                        ImGui::SameLine();
+                    bool sel = (i == gStamp);
+                    if (sel)
+                        ImGui::PushStyleColor(ImGuiCol_Button,
+                                              ImVec4(0.26f, 0.55f, 0.96f, 1.0f));
+                    ImGui::PushID(i);
+                    if (ImGui::ImageButton("stamp",
+                            (ImTextureID)(intptr_t)gStamps[i].tex,
+                            ImVec2(40, 40)))
+                        gStamp = i;
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("%s", gStamps[i].name);
+                    ImGui::PopID();
+                    if (sel)
+                        ImGui::PopStyleColor();
+                }
+                ImGui::SliderFloat("Brush Size", &brushRadius, 0.4f, 10.0f, "%.1f");
+                ImGui::SliderFloat("Opacity", &brushStrength, 0.1f, 3.0f, "%.1f");
+            };
+
+            if (ImGui::BeginTabBar("tools")) {
+                if (ImGui::BeginTabItem("Sculpt")) {
+                    const char* tools[] = { "Raise or Lower Terrain",
+                                            "Smooth Height", "Flatten" };
+                    ImGui::Combo("##sculpttool", &sculptTool, tools, 3);
+                    static const char* helps[] = {
+                        "Left click to raise.\nHold Shift and left click to lower.",
+                        "Left click to smooth the height.",
+                        "Left click to flatten toward the height where the "
+                        "stroke began.",
+                    };
+                    ImGui::TextWrapped("%s", helps[sculptTool]);
+                    mode = sculptTool == 0 ? BRUSH_RAISE
+                         : sculptTool == 1 ? BRUSH_SMOOTH : BRUSH_FLATTEN;
+                    brushGallery();
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("Paint")) {
+                    ImGui::TextWrapped("Paints the selected layer onto the "
+                                       "terrain.");
+                    ImGui::SeparatorText("Terrain Layers");
+                    struct Layer { const char* name; GLuint tex; BrushMode m; };
+                    const Layer layers[] = {
+                        { "Grass",     grassTex, BRUSH_ERASEDIRT },
+                        { "Path Dirt", dirtTex,  BRUSH_DIRT },
+                        { "Soft Dirt", dirt2Tex, BRUSH_DIRT2 },
+                    };
+                    for (int i = 0; i < 3; i++) {
+                        if (i)
+                            ImGui::SameLine();
+                        bool sel = (paintLayer == i);
+                        if (sel)
+                            ImGui::PushStyleColor(ImGuiCol_Button,
+                                ImVec4(0.26f, 0.55f, 0.96f, 1.0f));
+                        ImGui::PushID(100 + i);
+                        if (ImGui::ImageButton("layer",
+                                (ImTextureID)(intptr_t)layers[i].tex,
+                                ImVec2(48, 48)))
+                            paintLayer = i;
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("%s", layers[i].name);
+                        ImGui::PopID();
+                        if (sel)
+                            ImGui::PopStyleColor();
+                    }
+                    mode = layers[paintLayer].m;
+                    brushGallery();
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("Details")) {
+                    ImGui::TextWrapped("Paint grass blades. Density and "
+                                       "pattern are baked into the stroke.");
+                    if (ImGui::RadioButton("Paint Blades", detailTool == 0))
+                        detailTool = 0;
+                    ImGui::SameLine();
+                    if (ImGui::RadioButton("Erase Blades", detailTool == 1))
+                        detailTool = 1;
+                    mode = detailTool == 0 ? BRUSH_GRASS : BRUSH_KILLGRASS;
+                    if (detailTool == 0) {
+                        ImGui::SliderFloat("Density", &gGrassDensity,
+                                           0.0f, 1.0f, "%.2f");
+                        ImGui::Combo("Pattern", &gGrassPattern,
+                                     kGrassPatterns, 3);
+                    }
+                    ImGui::Checkbox("Show Grass", &showGrass);
+                    ImGui::SliderFloat("Global Density", &bladeDensity,
+                                       0.1f, 1.0f, "%.2f");
+                    brushGallery();
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("Map")) {
+                    if (ImGui::Button("Save (F5)"))
+                        save_map(mapPath);
+                    ImGui::SameLine();
+                    if (ImGui::Button("Load (F9)"))
+                        load_map(mapPath);
+                    ImGui::TextDisabled("RMB look  WASD/QE fly  [ ] size");
+                    ImGui::EndTabItem();
+                }
+                ImGui::EndTabBar();
             }
-            if (mode == BRUSH_RAISE)
-                ImGui::TextDisabled("hold Shift to lower");
-
-            ImGui::SeparatorText("Paint");
-            for (int i = BRUSH_DIRT; i <= BRUSH_KILLGRASS; i++) {
-                ImGui::PushStyleColor(ImGuiCol_Text,
-                    ImVec4(kBrushColors[i][0], kBrushColors[i][1],
-                           kBrushColors[i][2], 1.0f));
-                if (ImGui::RadioButton(kBrushNames[i], (int)mode == i))
-                    mode = (BrushMode)i;
-                ImGui::PopStyleColor();
-            }
-
-            ImGui::SeparatorText("Brush");
-            ImGui::SliderFloat("Radius", &brushRadius, 0.4f, 10.0f, "%.1f");
-            ImGui::SliderFloat("Strength", &brushStrength, 0.1f, 3.0f, "%.1f");
-            ImGui::Combo("Shape", &gShape, kShapeNames, 3);
-            ImGui::Combo("Falloff", &gFalloff, kFalloffNames, 4);
-            if (mode == BRUSH_GRASS) {
-                ImGui::SeparatorText("Grass Brush");
-                ImGui::SliderFloat("Density", &gGrassDensity, 0.0f, 1.0f, "%.2f");
-                ImGui::Combo("Pattern", &gGrassPattern, kGrassPatterns, 3);
-            }
-
-            ImGui::SeparatorText("View");
-            ImGui::Checkbox("Grass", &showGrass);
-            ImGui::SliderFloat("Blade Density", &bladeDensity, 0.1f, 1.0f, "%.2f");
-
-            ImGui::SeparatorText("Map");
-            if (ImGui::Button("Save (F5)"))
-                save_map(mapPath);
-            ImGui::SameLine();
-            if (ImGui::Button("Load (F9)"))
-                load_map(mapPath);
-
-            ImGui::TextDisabled("RMB look  WASD/QE fly  [ ] size");
             ImGui::End();
         }
         ImGui::Render();
