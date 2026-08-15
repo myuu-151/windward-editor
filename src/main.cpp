@@ -227,12 +227,13 @@ out vec4 fragColor;
 uniform sampler2D uGrassTex;
 
 void main() {
-    // blades take the ground painting's color so field and floor agree,
-    // dark at the root, bright toward the tip (the pack's gradient trick)
-    vec3 groundCol = texture(uGrassTex, vWorldXz * 0.16).rgb;
-    vec3 root = groundCol * 0.55;
-    vec3 tip  = groundCol * (1.15 + vSeed * 0.15);
-    vec3 col = mix(root, tip, vV * vV);
+    // blades take the LOCAL AVERAGE ground color (high mip = blurred), so
+    // they never pick up single flower/shadow pixels, and the root matches
+    // the ground almost exactly -- blades grow out of the floor instead of
+    // sitting on it
+    vec3 groundCol = textureLod(uGrassTex, vWorldXz * 0.16, 4.5).rgb;
+    vec3 tip  = groundCol * (1.16 + vSeed * 0.08);
+    vec3 col = mix(groundCol * 0.94, tip, vV * vV);
     fragColor = vec4(col, 1.0);
 }
 )";
@@ -421,7 +422,9 @@ static void save_screenshot(SDL_Window* win, const char* path)
 static std::vector<float>   gHeights(HN* HN, 0.0f);
 static std::vector<Uint8>   gMask(MASK_N* MASK_N, 0);   // path dirt layer
 static std::vector<Uint8>   gMask2(MASK_N* MASK_N, 0);  // soft dirt layer
-static std::vector<Uint8>   gKill(MASK_N* MASK_N, 0);   // 255 = no blades
+static std::vector<Uint8>   gKill(MASK_N* MASK_N, 255); // 255 = no blades;
+                                                        // maps start bare,
+                                                        // blades are painted
 static GLuint gHeightTex = 0, gMaskTex = 0, gMask2Tex = 0, gKillTex = 0;
 static bool gHeightsDirty = true, gMaskDirty = true, gMask2Dirty = true,
             gKillDirty = true;
