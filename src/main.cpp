@@ -825,10 +825,11 @@ static void load_stamp_files(const char* dir)
 }
 
 static void apply_brush(BrushMode mode, float cx, float cz, float radius,
-                        float dt, bool invert, float strength = 1.0f)
+                        float dt, bool invert, float strength = 1.0f,
+                        float paintTarget = 1.0f)
 {
-    dt *= strength;
     if (mode == BRUSH_RAISE || mode == BRUSH_SMOOTH || mode == BRUSH_FLATTEN) {
+        dt *= strength;
         float cell = 2.0f * TER_HALF / (HN - 1);
         int i0 = SDL_clamp((int)((cx - radius + TER_HALF) / cell), 0, HN - 1);
         int i1 = SDL_clamp((int)((cx + radius + TER_HALF) / cell) + 1, 0, HN - 1);
@@ -876,26 +877,40 @@ static void apply_brush(BrushMode mode, float cx, float cz, float radius,
                 float w = brush_weight(x - cx, z - cz, radius, x, z);
                 if (w <= 0.0f)
                     continue;
-                float rate = SDL_min(1.0f, 10.0f * w * dt);
-                auto blend = [rate](Uint8& v, float target) {
-                    float nv = v + (target - v) * rate;
-                    v = (Uint8)SDL_clamp((int)(nv + 0.5f), 0, 255);
+                // Unity-style target strength: strokes climb fast toward a
+                // ceiling and stop, so hover time doesn't overshoot
+                float step = 255.0f * SDL_min(1.0f, 8.0f * w * dt);
+                float cap = paintTarget * 255.0f;
+                auto raiseTo = [step](Uint8& v, float ceilv) {
+                    if (v >= ceilv)
+                        return;
+                    v = (Uint8)SDL_min(ceilv, v + step);
+                };
+                auto lowerTo = [step](Uint8& v, float floorv) {
+                    if (v <= floorv)
+                        return;
+                    v = (Uint8)SDL_max(floorv, v - step);
                 };
                 if (mode == BRUSH_DIRT) {
-                    blend(gMask[j * MASK_N + i], 255.0f);
-                    blend(gMask2[j * MASK_N + i], 0.0f);
+                    raiseTo(gMask[j * MASK_N + i], cap);
+                    lowerTo(gMask2[j * MASK_N + i], 0.0f);
                 } else if (mode == BRUSH_DIRT2) {
-                    blend(gMask2[j * MASK_N + i], 255.0f);
-                    blend(gMask[j * MASK_N + i], 0.0f);
+                    raiseTo(gMask2[j * MASK_N + i], cap);
+                    lowerTo(gMask[j * MASK_N + i], 0.0f);
                 } else if (mode == BRUSH_ERASEDIRT) {
-                    blend(gMask[j * MASK_N + i], 0.0f);
-                    blend(gMask2[j * MASK_N + i], 0.0f);
+                    lowerTo(gMask[j * MASK_N + i], (1.0f - paintTarget) * 255.0f);
+                    lowerTo(gMask2[j * MASK_N + i], (1.0f - paintTarget) * 255.0f);
                 } else if (mode == BRUSH_KILLGRASS) {
-                    blend(gKill[j * MASK_N + i], 255.0f);
+                    raiseTo(gKill[j * MASK_N + i], cap);
                 } else {   // grass blades only: density shaped by pattern,
                            // never touches the painted ground layers
                     float dens = gGrassDensity * grass_pattern(x, z);
-                    blend(gKill[j * MASK_N + i], (1.0f - dens) * 255.0f);
+                    float target = (1.0f - dens) * 255.0f;
+                    Uint8& v = gKill[j * MASK_N + i];
+                    if (v < target)
+                        raiseTo(v, target);
+                    else
+                        lowerTo(v, target);
                 }
             }
         gMaskDirty = gMask2Dirty = gKillDirty = true;
@@ -1191,6 +1206,7 @@ int main(int argc, char** argv)
     float camPos[3] = { 0.0f, 12.0f, 30.0f };
     float brushRadius = 2.5f;
     float brushStrength = 1.0f;
+    float paintTarget = 1.0f;
     float bladeDensity = 0.8f;
     BrushMode mode = BRUSH_RAISE;
     bool showGrass = true;
@@ -1335,7 +1351,8 @@ int main(int argc, char** argv)
                 if (!wasPainting && active == BRUSH_FLATTEN)
                     gFlattenTarget = height_at(hit[0], hit[2]);
                 apply_brush(active, hit[0], hit[2], brushRadius, dt,
-                            keys[SDL_SCANCODE_LSHIFT] != 0, brushStrength);
+                            keys[SDL_SCANCODE_LSHIFT] != 0, brushStrength,
+                            paintTarget);
             }
             wasPainting = painting;
         }
@@ -1463,7 +1480,6 @@ int main(int argc, char** argv)
                         ImGui::PopStyleColor();
                 }
                 ImGui::SliderFloat("Brush Size", &brushRadius, 0.4f, 10.0f, "%.1f");
-                ImGui::SliderFloat("Opacity", &brushStrength, 0.1f, 3.0f, "%.1f");
                 if (ImGui::SliderFloat("Falloff", &gBrushFalloff,
                                        0.05f, 8.0f, "%.2f",
                                        ImGuiSliderFlags_Logarithmic))
@@ -1486,6 +1502,8 @@ int main(int argc, char** argv)
                     mode = sculptTool == 0 ? BRUSH_RAISE
                          : sculptTool == 1 ? BRUSH_SMOOTH : BRUSH_FLATTEN;
                     brushGallery();
+                    ImGui::SliderFloat("Strength", &brushStrength,
+                                       0.1f, 3.0f, "%.1f");
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Paint")) {
@@ -1518,6 +1536,10 @@ int main(int argc, char** argv)
                     }
                     mode = layers[paintLayer].m;
                     brushGallery();
+                    // ceiling a stroke paints up to -- hovering never
+                    // overshoots it (Unity's Target Strength)
+                    ImGui::SliderFloat("Target Strength", &paintTarget,
+                                       0.05f, 1.0f, "%.2f");
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Details")) {
@@ -1539,6 +1561,8 @@ int main(int argc, char** argv)
                     ImGui::SliderFloat("Global Density", &bladeDensity,
                                        0.1f, 1.0f, "%.2f");
                     brushGallery();
+                    ImGui::SliderFloat("Strength", &brushStrength,
+                                       0.1f, 3.0f, "%.1f");
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Map")) {
