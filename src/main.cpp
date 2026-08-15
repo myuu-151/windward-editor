@@ -1275,12 +1275,16 @@ int main(int argc, char** argv)
                 hasHit = false;   // cursor over the panel: never paint through
             bool painting = hasHit && (mb & SDL_BUTTON_LMASK) && !shotPath;
             if (painting) {
-                if (!wasPainting && mode == BRUSH_FLATTEN)
-                    gFlattenTarget = height_at(hit[0], hit[2]);
-                // Ctrl while sculpting switches to smoothing, Unity-style
+                // sculpt modifiers: Ctrl smooths, Alt flattens
                 BrushMode active = mode;
-                if (mode == BRUSH_RAISE && keys[SDL_SCANCODE_LCTRL])
-                    active = BRUSH_SMOOTH;
+                if (mode == BRUSH_RAISE) {
+                    if (keys[SDL_SCANCODE_LCTRL])
+                        active = BRUSH_SMOOTH;
+                    else if (keys[SDL_SCANCODE_LALT] || keys[SDL_SCANCODE_RALT])
+                        active = BRUSH_FLATTEN;
+                }
+                if (!wasPainting && active == BRUSH_FLATTEN)
+                    gFlattenTarget = height_at(hit[0], hit[2]);
                 apply_brush(active, hit[0], hit[2], brushRadius, dt,
                             keys[SDL_SCANCODE_LSHIFT] != 0, brushStrength);
             }
@@ -1424,7 +1428,7 @@ int main(int argc, char** argv)
                     ImGui::Combo("##sculpttool", &sculptTool, tools, 3);
                     static const char* helps[] = {
                         "Left click to raise.\nHold Shift and left click to "
-                        "lower.\nHold Ctrl to smooth.",
+                        "lower.\nHold Ctrl to smooth.\nHold Alt to flatten.",
                         "Left click to smooth the height.",
                         "Left click to flatten toward the height where the "
                         "stroke began.",
