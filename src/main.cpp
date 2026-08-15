@@ -347,11 +347,20 @@ void main() {
                               : t.rgb * uKd;
     vec3 L = normalize(vec3(0.35, 0.8, -0.45));
     vec3 n = normalize(vNorm);
-    float diff = max(dot(n, L), 0.0);
-    // double-sided: leaves faces flip freely
-    diff = max(diff, max(dot(-n, L), 0.0) * 0.8);
-    diff *= shadow_factor(vWorld);
-    col *= 0.68 + 0.42 * diff;
+    float sf = shadow_factor(vWorld);
+    if (uGrayMask == 1) {
+        // foliage: soft wrap lighting and mostly shadow-immune, so
+        // canopies read as toon masses instead of speckled black --
+        // they still CAST onto the ground
+        float wrap = clamp(dot(n, L) * 0.4 + 0.6, 0.0, 1.0);
+        col *= (0.55 + 0.5 * wrap) * mix(0.82, 1.0, sf);
+    } else {
+        float diff = max(dot(n, L), 0.0);
+        // double-sided: faces flip freely
+        diff = max(diff, max(dot(-n, L), 0.0) * 0.8);
+        diff *= mix(1.0, sf, 0.85);
+        col *= 0.68 + 0.42 * diff;
+    }
     fragColor = vec4(col, 1.0);
 }
 )";
