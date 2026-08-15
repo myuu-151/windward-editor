@@ -218,6 +218,7 @@ uniform float uShadowDark;
 uniform float uHalf;
 uniform float uTime;
 uniform float uDensity;
+uniform float uSwayAmp;   // 0 in the AO pass: occlusion stays at roots
 out float vShadow;
 out float vV;
 out vec2  vWorldXz;
@@ -262,7 +263,7 @@ void main() {
     float phase = dot(xz, vec2(0.8, 0.6)) * 0.7 + uTime * 1.8;
     float gust  = sin(phase) * 0.5 + sin(phase * 0.37 + 1.7) * 0.5;
     float sway  = (gust * 0.10 + sin(uTime * 3.1 + aInst.w * 6.28) * 0.03)
-                  * aBlade.y * aBlade.y;
+                  * aBlade.y * aBlade.y * uSwayAmp;
     p.xz += vec2(0.85, 0.53) * sway;
 
     // one shadow probe per blade at its root: the blade inherits exactly
@@ -2367,6 +2368,7 @@ int main(int argc, char** argv)
                 glUniform1f(glGetUniformLocation(aoProg, "uDensity"),
                             bladeDensity);
                 glUniform1i(glGetUniformLocation(aoProg, "uShadowsOn"), 0);
+                glUniform1f(glGetUniformLocation(aoProg, "uSwayAmp"), 0.0f);
                 glActiveTexture(GL_TEXTURE0);
                 glBindTexture(GL_TEXTURE_2D, gHeightTex);
                 glUniform1i(glGetUniformLocation(aoProg, "uHeight"), 0);
@@ -2581,6 +2583,7 @@ int main(int argc, char** argv)
                         shadowsOn ? 1 : 0);
             glUniform1f(glGetUniformLocation(grassProg, "uShadowDark"),
                         grassShadowDark);
+            glUniform1f(glGetUniformLocation(grassProg, "uSwayAmp"), 1.0f);
             glDisable(GL_CULL_FACE);
             glBindVertexArray(grassVao);
             glDrawArraysInstanced(GL_TRIANGLES, 0, 12, instCount);
