@@ -352,8 +352,8 @@ void main() {
         // foliage: soft wrap lighting and mostly shadow-immune, so
         // canopies read as toon masses instead of speckled black --
         // they still CAST onto the ground
-        float wrap = clamp(dot(n, L) * 0.4 + 0.6, 0.0, 1.0);
-        col *= (0.55 + 0.5 * wrap) * mix(0.82, 1.0, sf);
+        float wrap = clamp(dot(n, L) * 0.55 + 0.45, 0.0, 1.0);
+        col *= (0.42 + 0.62 * wrap) * mix(0.60, 1.0, sf);
     } else {
         float diff = max(dot(n, L), 0.0);
         // double-sided: faces flip freely
