@@ -692,6 +692,24 @@ static void make_stamps()
     add("Star Ring", starring, 0);
 }
 
+// drop any stamp that fills its corners (reads as a square brush)
+static void prune_square_stamps()
+{
+    for (size_t i = 0; i < gStamps.size();) {
+        const std::vector<float>& a = gStamps[i].alpha;
+        float corners = a[0] + a[STAMP_N - 1] + a[(STAMP_N - 1) * STAMP_N] +
+                        a[STAMP_N * STAMP_N - 1];
+        if (corners > 1.2f) {
+            glDeleteTextures(1, &gStamps[i].tex);
+            gStamps.erase(gStamps.begin() + i);
+        } else {
+            i++;
+        }
+    }
+    if (gStamp >= (int)gStamps.size())
+        gStamp = 0;
+}
+
 // re-render every gallery thumbnail with the current falloff curve so
 // the previews track the Falloff slider
 static void update_stamp_thumbnails()
@@ -1012,6 +1030,7 @@ int main(int argc, char** argv)
         char brushDir[760];
         SDL_snprintf(brushDir, sizeof brushDir, "%sbrushes", assetsDir);
         load_stamp_files(brushDir);
+        prune_square_stamps();
     }
 
     // terrain grid (static xz, heights come from the texture)
@@ -1384,7 +1403,8 @@ int main(int argc, char** argv)
                 ImGui::SliderFloat("Brush Size", &brushRadius, 0.4f, 10.0f, "%.1f");
                 ImGui::SliderFloat("Opacity", &brushStrength, 0.1f, 3.0f, "%.1f");
                 if (ImGui::SliderFloat("Falloff", &gBrushFalloff,
-                                       0.25f, 3.0f, "%.2f"))
+                                       0.05f, 8.0f, "%.2f",
+                                       ImGuiSliderFlags_Logarithmic))
                     update_stamp_thumbnails();
             };
 
