@@ -82,8 +82,10 @@ uniform sampler2D uBrushStamp;
 uniform float uBrushFalloff;
 uniform float uEdgeBreak;   // 0 = crisp edges, 1 = wide ragged breakup
 uniform sampler2D uShadowMap;
+uniform sampler2D uKillMap;
 uniform mat4 uLightMvp;
 uniform int uShadowsOn;
+uniform float uGrassAO;   // ground contact-darkening under dense blades
 
 float shadow_factor(vec3 world) {
     if (uShadowsOn == 0)
@@ -170,6 +172,12 @@ void main() {
     float cliffM = smoothstep(0.22, 0.42, slope + (fbm(vWorld.xz * 1.7) - 0.5) * 0.18);
     col = mix(col, cliff, cliffM);
 
+    // fake baked AO: ground darkens where blades stand on it (the painted
+    // density mask doubles as an occlusion map), fading out on dirt/cliff
+    float bladeDens = 1.0 - texture(uKillMap, maskUv).r;
+    float grassArea = (1.0 - edge) * (1.0 - edge2) * (1.0 - cliffM);
+    col *= 1.0 - uGrassAO * bladeDens * grassArea;
+
     vec3 L = normalize(vec3(0.35, 0.8, -0.45));
     float diff = max(dot(normalize(vNormal), L), 0.0);
     diff *= shadow_factor(vWorld);
@@ -204,6 +212,7 @@ uniform sampler2D uKill;
 uniform sampler2D uShadowMap;
 uniform mat4 uLightMvp;
 uniform int uShadowsOn;
+uniform float uShadowDark;
 uniform float uHalf;
 uniform float uTime;
 uniform float uDensity;
@@ -265,7 +274,7 @@ void main() {
             sp.z < 1.0) {
             float d = texture(uShadowMap, sp.xy).r;
             if (sp.z - 0.003 > d)
-                vShadow = 0.55;
+                vShadow = uShadowDark;
         }
     }
     vV = aBlade.y;
@@ -1561,6 +1570,7 @@ struct TuneBlob {
     int stamp = 1, grassPattern = 0, showGrass = 1, randomYaw = 1;
     int sculptTool = 0, paintLayer = 0, detailTool = 0, propTool = 0;
     int propCat = 0, shadows = 1;
+    float grassShadowDark = 0.55f, groundAO = 0.0f;
 };
 static TuneBlob gTune;
 static bool gLoadedTune = false;
@@ -1946,6 +1956,8 @@ int main(int argc, char** argv)
     float bladeDensity = 0.8f;
     bool showGrass = true;
     bool shadowsOn = true;
+    float grassShadowDark = 0.55f;   // blade brightness inside shadow
+    float groundAO = 0.0f;           // contact AO under dense blades
     // prop tools
     int activeTab = 0;          // 0 sculpt, 1 paint, 2 details, 3 props
     int sculptTool = 0, paintLayer = 0, detailTool = 0;
@@ -1986,6 +1998,8 @@ int main(int argc, char** argv)
         gTune.propTool = propTool;
         gTune.propCat = propCat;
         gTune.shadows = shadowsOn ? 1 : 0;
+        gTune.grassShadowDark = grassShadowDark;
+        gTune.groundAO = groundAO;
     };
     auto applySettingsIn = [&]() {
         if (gLoadedSettings) {
@@ -2017,6 +2031,8 @@ int main(int argc, char** argv)
             propTool = SDL_clamp(gTune.propTool, 0, 3);
             propCat = gTune.propCat;
             shadowsOn = gTune.shadows != 0;
+            grassShadowDark = gTune.grassShadowDark;
+            groundAO = gTune.groundAO;
             update_stamp_thumbnails();
             if (fabsf(uiScale - gTune.uiScale) > 0.01f) {
                 uiScale = gTune.uiScale;
@@ -2360,6 +2376,10 @@ int main(int argc, char** argv)
         glActiveTexture(GL_TEXTURE8);
         glBindTexture(GL_TEXTURE_2D, shadowTex);
         glUniform1i(glGetUniformLocation(terProg, "uShadowMap"), 8);
+        glActiveTexture(GL_TEXTURE9);
+        glBindTexture(GL_TEXTURE_2D, gKillTex);
+        glUniform1i(glGetUniformLocation(terProg, "uKillMap"), 9);
+        glUniform1f(glGetUniformLocation(terProg, "uGrassAO"), groundAO);
         glUniformMatrix4fv(glGetUniformLocation(terProg, "uLightMvp"), 1,
                            GL_FALSE, lightMvp.m);
         glUniform1i(glGetUniformLocation(terProg, "uShadowsOn"),
@@ -2443,6 +2463,8 @@ int main(int argc, char** argv)
                                1, GL_FALSE, lightMvp.m);
             glUniform1i(glGetUniformLocation(grassProg, "uShadowsOn"),
                         shadowsOn ? 1 : 0);
+            glUniform1f(glGetUniformLocation(grassProg, "uShadowDark"),
+                        grassShadowDark);
             glDisable(GL_CULL_FACE);
             glBindVertexArray(grassVao);
             glDrawArraysInstanced(GL_TRIANGLES, 0, 12, instCount);
@@ -2589,6 +2611,10 @@ int main(int argc, char** argv)
                     ImGui::Checkbox("Show Grass", &showGrass);
                     ImGui::SliderFloat("Global Density", &bladeDensity,
                                        0.1f, 1.0f, "%.2f");
+                    ImGui::SliderFloat("Shadow Dark", &grassShadowDark,
+                                       0.2f, 1.0f, "%.2f");
+                    ImGui::SliderFloat("Ground AO", &groundAO,
+                                       0.0f, 0.6f, "%.2f");
                     brushGallery();
                     ImGui::SliderFloat("Strength", &brushStrength,
                                        0.1f, 3.0f, "%.1f");
