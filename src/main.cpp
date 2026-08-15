@@ -1581,6 +1581,7 @@ struct TuneBlob {
     int propCat = 0, shadows = 1;
     float grassShadowDark = 0.55f, groundAO = 0.0f;
     float aoRadius = 2.5f, shadowStrength = 1.0f;
+    char propSelId[96] = { 0 };   // selected prop as "category/label"
 };
 static TuneBlob gTune;
 static bool gLoadedTune = false;
@@ -1592,7 +1593,7 @@ static void save_map(const char* path)
         SDL_Log("save failed: %s", path);
         return;
     }
-    const char magic[8] = { 'T','E','R','M','A','P','0','6' };
+    const char magic[8] = { 'T','E','R','M','A','P','0','7' };
     fwrite(magic, 1, 8, f);
     fwrite(gHeights.data(), sizeof(float), gHeights.size(), f);
     fwrite(gMask.data(), 1, gMask.size(), f);
@@ -1613,7 +1614,11 @@ static void save_map(const char* path)
     fwrite(&gSetBlade, sizeof(float), 1, f);
     fwrite(&gSetEdge, sizeof(float), 1, f);
     fwrite(gSetCam, sizeof(float), 5, f);
-    fwrite(&gTune, sizeof gTune, 1, f);
+    // size-prefixed settings blob: adding sliders later never breaks
+    // older or newer saves
+    Uint32 tsz = (Uint32)sizeof gTune;
+    fwrite(&tsz, 4, 1, f);
+    fwrite(&gTune, tsz, 1, f);
     fclose(f);
     SDL_Log("saved %s", path);
 }
@@ -1676,8 +1681,22 @@ static bool load_map(const char* path)
             fread(gSetCam, sizeof(float), 5, f) == 5)
             gLoadedSettings = true;
     }
-    if (magic[7] >= '6' && fread(&gTune, sizeof gTune, 1, f) == 1)
-        gLoadedTune = true;
+    if (magic[7] == '6') {
+        // legacy fixed-size blob (best effort)
+        if (fread(&gTune, sizeof gTune, 1, f) == 1)
+            gLoadedTune = true;
+    } else if (magic[7] >= '7') {
+        Uint32 tsz = 0;
+        if (fread(&tsz, 4, 1, f) == 1 && tsz > 0) {
+            gTune = TuneBlob();   // defaults for fields the file predates
+            Uint32 take = SDL_min(tsz, (Uint32)sizeof gTune);
+            if (fread(&gTune, 1, take, f) == take) {
+                if (tsz > take)
+                    fseek(f, tsz - take, SEEK_CUR);
+                gLoadedTune = true;
+            }
+        }
+    }
     fclose(f);
     gHeightsDirty = gMaskDirty = gMask2Dirty = gKillDirty = true;
     SDL_Log("loaded %s", path);
@@ -2040,6 +2059,11 @@ int main(int argc, char** argv)
         gTune.groundAO = groundAO;
         gTune.aoRadius = aoRadius;
         gTune.shadowStrength = shadowStrength;
+        memset(gTune.propSelId, 0, sizeof gTune.propSelId);
+        if (propSel >= 0 && propSel < (int)gPropMeshes.size())
+            SDL_strlcpy(gTune.propSelId,
+                        mesh_id(gPropMeshes[propSel]).c_str(),
+                        sizeof gTune.propSelId);
     };
     auto applySettingsIn = [&]() {
         if (gLoadedSettings) {
@@ -2075,6 +2099,13 @@ int main(int argc, char** argv)
             groundAO = gTune.groundAO;
             aoRadius = gTune.aoRadius;
             shadowStrength = gTune.shadowStrength;
+            if (gTune.propSelId[0]) {
+                for (int mi = 0; mi < (int)gPropMeshes.size(); mi++)
+                    if (mesh_id(gPropMeshes[mi]) == gTune.propSelId) {
+                        propSel = mi;
+                        break;
+                    }
+            }
             update_stamp_thumbnails();
             if (fabsf(uiScale - gTune.uiScale) > 0.01f) {
                 uiScale = gTune.uiScale;
