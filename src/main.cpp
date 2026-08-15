@@ -219,6 +219,7 @@ uniform float uHalf;
 uniform float uTime;
 uniform float uDensity;
 uniform float uSwayAmp;   // 0 in the AO pass: occlusion stays at roots
+uniform int uFlatten;     // AO pass: lay the blade flat as a footprint
 out float vShadow;
 out float vV;
 out vec2  vWorldXz;
@@ -265,6 +266,15 @@ void main() {
     float sway  = (gust * 0.10 + sin(uTime * 3.1 + aInst.w * 6.28) * 0.03)
                   * aBlade.y * aBlade.y * uSwayAmp;
     p.xz += vec2(0.85, 0.53) * sway;
+
+    // AO pass: a vertical card has no area from above -- lay the blade
+    // down as a small crossed footprint at its root instead
+    if (uFlatten == 1) {
+        vec2 perp = vec2(-dir.y, dir.x);
+        float fs = wid * 3.0 * show;
+        p = vec3(xz.x, ground, xz.y);
+        p.xz += dir * aBlade.x * fs + perp * (aBlade.y - 0.5) * 2.0 * fs;
+    }
 
     // one shadow probe per blade at its root: the blade inherits exactly
     // the shadow the ground under it has, so canopy patterns flow across
@@ -2369,6 +2379,7 @@ int main(int argc, char** argv)
                             bladeDensity);
                 glUniform1i(glGetUniformLocation(aoProg, "uShadowsOn"), 0);
                 glUniform1f(glGetUniformLocation(aoProg, "uSwayAmp"), 0.0f);
+                glUniform1i(glGetUniformLocation(aoProg, "uFlatten"), 1);
                 glActiveTexture(GL_TEXTURE0);
                 glBindTexture(GL_TEXTURE_2D, gHeightTex);
                 glUniform1i(glGetUniformLocation(aoProg, "uHeight"), 0);
@@ -2584,6 +2595,7 @@ int main(int argc, char** argv)
             glUniform1f(glGetUniformLocation(grassProg, "uShadowDark"),
                         grassShadowDark);
             glUniform1f(glGetUniformLocation(grassProg, "uSwayAmp"), 1.0f);
+            glUniform1i(glGetUniformLocation(grassProg, "uFlatten"), 0);
             glDisable(GL_CULL_FACE);
             glBindVertexArray(grassVao);
             glDrawArraysInstanced(GL_TRIANGLES, 0, 12, instCount);
