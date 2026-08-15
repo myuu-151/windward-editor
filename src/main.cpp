@@ -77,6 +77,8 @@ uniform sampler2D uCliffTex;
 uniform float uHalf;
 uniform vec4  uBrush;    // xz, radius, active
 uniform vec3  uBrushCol;
+uniform sampler2D uBrushStamp;
+uniform float uBrushFalloff;
 
 float hash(vec2 p) {
     p = fract(p * vec2(123.34, 456.21));
@@ -146,8 +148,15 @@ void main() {
     float diff = max(dot(normalize(vNormal), L), 0.0);
     col *= 0.72 + 0.38 * diff;
 
-    // brush ring
+    // brush preview: project the stamp (with the falloff curve) inside
+    // the cursor circle, plus the rim ring
     if (uBrush.w > 0.5) {
+        vec2 buv = (vWorld.xz - uBrush.xy) / uBrush.z * 0.5 + 0.5;
+        if (buv.x > 0.0 && buv.x < 1.0 && buv.y > 0.0 && buv.y < 1.0) {
+            float a = texture(uBrushStamp, buv).r;
+            a = a <= 0.0 ? 0.0 : pow(a, uBrushFalloff);
+            col = mix(col, uBrushCol, a * 0.45);
+        }
         float d = length(vWorld.xz - uBrush.xy);
         float ring = smoothstep(uBrush.z * 0.92, uBrush.z * 0.97, d) *
                      (1.0 - smoothstep(uBrush.z * 1.03, uBrush.z * 1.08, d));
@@ -511,6 +520,7 @@ struct BrushStamp {
 static const int STAMP_N = 64;
 static std::vector<BrushStamp> gStamps;
 static int gStamp = 1;   // default: soft round
+static float gBrushFalloff = 1.0f;   // power curve: <1 softer, >1 harder
 
 // grass brush settings: painted density and placement pattern, baked
 // into the density mask so different areas keep different patterns
@@ -565,7 +575,8 @@ static float brush_weight(float dx, float dz, float radius, float, float)
     int iy1 = SDL_min(iy + 1, STAMP_N - 1);
     float top = a[iy * STAMP_N + ix] * (1 - tx) + a[iy * STAMP_N + ix1] * tx;
     float bot = a[iy1 * STAMP_N + ix] * (1 - tx) + a[iy1 * STAMP_N + ix1] * tx;
-    return top * (1 - ty) + bot * ty;
+    float w = top * (1 - ty) + bot * ty;
+    return w <= 0.0f ? 0.0f : powf(w, gBrushFalloff);
 }
 
 // build the default gallery: soft/hard rounds, splotches, hexagon, star
@@ -1271,6 +1282,11 @@ int main(int argc, char** argv)
         glUniform4fv(glGetUniformLocation(terProg, "uBrush"), 1, brushU);
         glUniform3fv(glGetUniformLocation(terProg, "uBrushCol"), 1,
                      kBrushColors[mode]);
+        glActiveTexture(GL_TEXTURE7);
+        glBindTexture(GL_TEXTURE_2D, gStamps[gStamp].tex);
+        glUniform1i(glGetUniformLocation(terProg, "uBrushStamp"), 7);
+        glUniform1f(glGetUniformLocation(terProg, "uBrushFalloff"),
+                    gBrushFalloff);
         glBindVertexArray(terVao);
         glDrawElements(GL_TRIANGLES, (GLsizei)idx.size(), GL_UNSIGNED_INT, nullptr);
 
@@ -1346,6 +1362,7 @@ int main(int argc, char** argv)
                 }
                 ImGui::SliderFloat("Brush Size", &brushRadius, 0.4f, 10.0f, "%.1f");
                 ImGui::SliderFloat("Opacity", &brushStrength, 0.1f, 3.0f, "%.1f");
+                ImGui::SliderFloat("Falloff", &gBrushFalloff, 0.25f, 3.0f, "%.2f");
             };
 
             if (ImGui::BeginTabBar("tools")) {
