@@ -480,6 +480,33 @@ void main() {
 }
 )";
 
+// world waterline: a simple ocean plane marking sea level
+static const char* WATER_VS = R"(#version 330 core
+const vec2 verts[6] = vec2[6](vec2(-1,-1), vec2(1,-1), vec2(-1,1),
+                              vec2(1,-1), vec2(1,1), vec2(-1,1));
+uniform mat4 uMvp;
+uniform float uLevel;
+uniform float uExtent;
+out vec2 vXz;
+void main() {
+    vec2 p = verts[gl_VertexID] * uExtent;
+    vXz = p;
+    gl_Position = uMvp * vec4(p.x, uLevel, p.y, 1.0);
+}
+)";
+
+static const char* WATER_FS = R"(#version 330 core
+in vec2 vXz;
+out vec4 fragColor;
+void main() {
+    // basic sea blue, slightly lighter toward the horizon distance
+    float d = length(vXz);
+    vec3 col = mix(vec3(0.10, 0.38, 0.72), vec3(0.30, 0.55, 0.85),
+                   smoothstep(40.0, 160.0, d));
+    fragColor = vec4(col, 1.0);
+}
+)";
+
 // depth-only passes for the shadow map
 static const char* DEPTH_FS = R"(#version 330 core
 void main() {}
@@ -1661,6 +1688,8 @@ struct TuneBlob {
     float aoRadius = 2.5f, shadowStrength = 1.0f;
     char propSelId[96] = { 0 };   // selected prop as "category/label"
     float islandDepth = 0.0f;
+    float waterline = -3.0f;
+    int showWater = 1;
 };
 static TuneBlob gTune;
 static bool gLoadedTune = false;
@@ -1789,6 +1818,8 @@ static const int WORLD_MAX = 8;
 static int gWorldSize = 7;               // Wind Waker's chart is 7x7
 static std::string gWorldCells[WORLD_MAX][WORLD_MAX];
 static int gWorldSel[2] = { 0, 0 };
+static float gWaterline = -3.0f;         // sea level in world units
+static bool gShowWater = true;
 
 static void save_world(const char* path)
 {
@@ -1797,7 +1828,8 @@ static void save_world(const char* path)
         SDL_Log("world save failed: %s", path);
         return;
     }
-    fprintf(f, "wworld 1\nsize %d\nloop 1\n", gWorldSize);
+    fprintf(f, "wworld 1\nsize %d\nloop 1\nwaterline %f\n", gWorldSize,
+            gWaterline);
     for (int y = 0; y < gWorldSize; y++)
         for (int x = 0; x < gWorldSize; x++)
             if (!gWorldCells[y][x].empty())
@@ -1819,8 +1851,11 @@ static bool load_world(const char* path)
     while (fgets(line, sizeof line, f)) {
         int x, y, n;
         char p[1024];
+        float wl;
         if (sscanf(line, "size %d", &n) == 1)
             gWorldSize = SDL_clamp(n, 2, WORLD_MAX);
+        else if (sscanf(line, "waterline %f", &wl) == 1)
+            gWaterline = wl;
         else if (sscanf(line, "cell %d %d %1023[^\n]", &x, &y, p) == 3)
             if (x >= 0 && x < WORLD_MAX && y >= 0 && y < WORLD_MAX)
                 gWorldCells[y][x] = p;
@@ -2240,6 +2275,8 @@ int main(int argc, char** argv)
         gTune.aoRadius = aoRadius;
         gTune.shadowStrength = shadowStrength;
         gTune.islandDepth = islandDepth;
+        gTune.waterline = gWaterline;
+        gTune.showWater = gShowWater ? 1 : 0;
         memset(gTune.propSelId, 0, sizeof gTune.propSelId);
         if (propSel >= 0 && propSel < (int)gPropMeshes.size())
             SDL_strlcpy(gTune.propSelId,
@@ -2281,6 +2318,8 @@ int main(int argc, char** argv)
             aoRadius = gTune.aoRadius;
             shadowStrength = gTune.shadowStrength;
             islandDepth = gTune.islandDepth;
+            gWaterline = gTune.waterline;
+            gShowWater = gTune.showWater != 0;
             if (gTune.propSelId[0]) {
                 for (int mi = 0; mi < (int)gPropMeshes.size(); mi++)
                     if (mesh_id(gPropMeshes[mi]) == gTune.propSelId) {
@@ -2718,6 +2757,20 @@ int main(int argc, char** argv)
                            nullptr);
         }
 
+        // ocean plane at the waterline
+        if (gShowWater) {
+            static GLuint waterProg = make_program(WATER_VS, WATER_FS);
+            glUseProgram(waterProg);
+            glUniformMatrix4fv(glGetUniformLocation(waterProg, "uMvp"), 1,
+                               GL_FALSE, mvp.m);
+            glUniform1f(glGetUniformLocation(waterProg, "uLevel"),
+                        gWaterline);
+            glUniform1f(glGetUniformLocation(waterProg, "uExtent"),
+                        TER_HALF * 8.0f);
+            glBindVertexArray(emptyVao);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+        }
+
         // props
         if (!gProps.empty()) {
             glUseProgram(propProg);
@@ -3110,6 +3163,10 @@ int main(int argc, char** argv)
                                        "loops at its edges, Wind Waker "
                                        "style.");
                     ImGui::SliderInt("Chart Size", &gWorldSize, 2, WORLD_MAX);
+                    ImGui::SliderFloat("Waterline", &gWaterline,
+                                       -20.0f, 10.0f, "%.1f");
+                    ImGui::SameLine();
+                    ImGui::Checkbox("Show", &gShowWater);
                     ImGui::Separator();
                     float cellPx = SDL_min(38.0f * uiScale,
                         (ImGui::GetContentRegionAvail().x - 8.0f) /
