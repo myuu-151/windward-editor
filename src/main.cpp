@@ -692,6 +692,26 @@ static void make_stamps()
     add("Star Ring", starring, 0);
 }
 
+// re-render every gallery thumbnail with the current falloff curve so
+// the previews track the Falloff slider
+static void update_stamp_thumbnails()
+{
+    std::vector<unsigned char> rgba(STAMP_N * STAMP_N * 4);
+    for (BrushStamp& st : gStamps) {
+        for (int i = 0; i < STAMP_N * STAMP_N; i++) {
+            float a = st.alpha[i];
+            a = a <= 0.0f ? 0.0f : powf(a, gBrushFalloff);
+            unsigned char c = (unsigned char)(SDL_clamp(a, 0.0f, 1.0f) * 255.0f);
+            rgba[i * 4] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = c;
+            rgba[i * 4 + 3] = 255;
+        }
+        glBindTexture(GL_TEXTURE_2D, st.tex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, STAMP_N, STAMP_N, 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, rgba.data());
+    }
+}
+
 // grayscale BMPs in assets/brushes/ become stamps too (e.g. the real
 // Unity built-in brushes exported from the editor)
 static void load_stamp_files(const char* dir)
@@ -1285,8 +1305,9 @@ int main(int argc, char** argv)
         glActiveTexture(GL_TEXTURE7);
         glBindTexture(GL_TEXTURE_2D, gStamps[gStamp].tex);
         glUniform1i(glGetUniformLocation(terProg, "uBrushStamp"), 7);
-        glUniform1f(glGetUniformLocation(terProg, "uBrushFalloff"),
-                    gBrushFalloff);
+        // falloff is baked into the stamp textures by
+        // update_stamp_thumbnails, so the preview shader applies none
+        glUniform1f(glGetUniformLocation(terProg, "uBrushFalloff"), 1.0f);
         glBindVertexArray(terVao);
         glDrawElements(GL_TRIANGLES, (GLsizei)idx.size(), GL_UNSIGNED_INT, nullptr);
 
@@ -1362,7 +1383,9 @@ int main(int argc, char** argv)
                 }
                 ImGui::SliderFloat("Brush Size", &brushRadius, 0.4f, 10.0f, "%.1f");
                 ImGui::SliderFloat("Opacity", &brushStrength, 0.1f, 3.0f, "%.1f");
-                ImGui::SliderFloat("Falloff", &gBrushFalloff, 0.25f, 3.0f, "%.2f");
+                if (ImGui::SliderFloat("Falloff", &gBrushFalloff,
+                                       0.25f, 3.0f, "%.2f"))
+                    update_stamp_thumbnails();
             };
 
             if (ImGui::BeginTabBar("tools")) {
