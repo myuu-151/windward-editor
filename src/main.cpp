@@ -79,6 +79,7 @@ uniform vec4  uBrush;    // xz, radius, active
 uniform vec3  uBrushCol;
 uniform sampler2D uBrushStamp;
 uniform float uBrushFalloff;
+uniform float uEdgeBreak;   // 0 = crisp edges, 1 = wide ragged breakup
 
 float hash(vec2 p) {
     p = fract(p * vec2(123.34, 456.21));
@@ -121,10 +122,14 @@ void main() {
     soft *= mix(vec3(0.96, 0.94, 0.88), vec3(1.05, 1.03, 0.98),
                 fbm(vWorld.xz * 0.17 + 5.1));
 
-    // noise-broken blend edges: painted borders go ragged by themselves
+    // noise-broken blend edges: painted borders go ragged by themselves;
+    // uEdgeBreak widens the band and cranks the noise so even small
+    // brushes keep the organic crumble
     float n = fbm(vWorld.xz * 1.1) - 0.5;
-    float edge = smoothstep(0.42, 0.58, m + n * 0.38);
-    float edge2 = smoothstep(0.42, 0.58, m2 + n * 0.38);
+    float amp = uEdgeBreak * 0.8;
+    float band = 0.03 + uEdgeBreak * 0.25;
+    float edge = smoothstep(0.5 - band, 0.5 + band, m + n * amp);
+    float edge2 = smoothstep(0.5 - band, 0.5 + band, m2 + n * amp);
     vec3 col = mix(grass, dirt, edge);
     col = mix(col, soft, edge2);
     // soft shadowed band where grass meets dirt grounds the path
@@ -1215,6 +1220,7 @@ int main(int argc, char** argv)
     float brushRadius = 2.5f;
     float brushStrength = 1.0f;
     float paintTarget = 1.0f;
+    float edgeBreak = 0.5f;
     float bladeDensity = 0.8f;
     BrushMode mode = BRUSH_RAISE;
     bool showGrass = true;
@@ -1414,6 +1420,7 @@ int main(int argc, char** argv)
         // falloff is baked into the stamp textures by
         // update_stamp_thumbnails, so the preview shader applies none
         glUniform1f(glGetUniformLocation(terProg, "uBrushFalloff"), 1.0f);
+        glUniform1f(glGetUniformLocation(terProg, "uEdgeBreak"), edgeBreak);
         glBindVertexArray(terVao);
         glDrawElements(GL_TRIANGLES, (GLsizei)idx.size(), GL_UNSIGNED_INT, nullptr);
 
@@ -1553,6 +1560,8 @@ int main(int argc, char** argv)
                     // overshoots it (Unity's Target Strength)
                     ImGui::SliderFloat("Target Strength", &paintTarget,
                                        0.05f, 1.0f, "%.2f");
+                    ImGui::SliderFloat("Edge Breakup", &edgeBreak,
+                                       0.0f, 1.0f, "%.2f");
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Details")) {
