@@ -420,6 +420,7 @@ uniform mat4 uMvp;
 uniform sampler2D uHeight;
 uniform float uHalf;
 uniform float uDepth;
+uniform float uFrill;   // lateral noise on the underside silhouette
 out vec3 vWorld;
 out vec3 vNormal;
 out float vT;
@@ -445,7 +446,13 @@ void main() {
         pos = vec3(xz.x, texture(uHeight, uv).r, xz.y);
     } else if (t < 1.5) {
         float n = vnoise(xz * 0.35);
-        pos = vec3(xz.x * 0.82, -uDepth * (0.55 + 0.5 * n), xz.y * 0.82);
+        // frill: scalloped lobes pushing the underside in and out
+        float f1 = vnoise(xz * 0.45 + 11.0) - 0.5;
+        float f2 = vnoise(xz * 1.3 + 7.0) - 0.5;
+        float taper = 0.82 + (f1 * 0.5 + f2 * 0.2) * uFrill;
+        pos = vec3(xz.x * taper,
+                   -uDepth * (0.55 + 0.5 * n + f2 * 0.5 * uFrill),
+                   xz.y * taper);
     } else {
         pos = vec3(0.0, -uDepth * 1.25, 0.0);
     }
@@ -1690,6 +1697,7 @@ struct TuneBlob {
     float islandDepth = 0.0f;
     float waterline = -3.0f;
     int showWater = 1;
+    float islandFrill = 0.0f;
 };
 static TuneBlob gTune;
 static bool gLoadedTune = false;
@@ -2230,6 +2238,7 @@ int main(int argc, char** argv)
     float aoRadius = 2.5f;           // AO spread (mip level)
     float shadowStrength = 1.0f;     // sun shadow intensity
     float islandDepth = 0.0f;        // skirt extrusion below the terrain
+    float islandFrill = 0.0f;        // scalloped underside silhouette
     // prop tools
     int activeTab = 0;          // 0 sculpt, 1 paint, 2 details, 3 props
     int sculptTool = 0, paintLayer = 0, detailTool = 0;
@@ -2277,6 +2286,7 @@ int main(int argc, char** argv)
         gTune.islandDepth = islandDepth;
         gTune.waterline = gWaterline;
         gTune.showWater = gShowWater ? 1 : 0;
+        gTune.islandFrill = islandFrill;
         memset(gTune.propSelId, 0, sizeof gTune.propSelId);
         if (propSel >= 0 && propSel < (int)gPropMeshes.size())
             SDL_strlcpy(gTune.propSelId,
@@ -2320,6 +2330,7 @@ int main(int argc, char** argv)
             islandDepth = gTune.islandDepth;
             gWaterline = gTune.waterline;
             gShowWater = gTune.showWater != 0;
+            islandFrill = gTune.islandFrill;
             if (gTune.propSelId[0]) {
                 for (int mi = 0; mi < (int)gPropMeshes.size(); mi++)
                     if (mesh_id(gPropMeshes[mi]) == gTune.propSelId) {
@@ -2745,6 +2756,8 @@ int main(int argc, char** argv)
             glUniform1f(glGetUniformLocation(skirtProg, "uHalf"), TER_HALF);
             glUniform1f(glGetUniformLocation(skirtProg, "uDepth"),
                         islandDepth);
+            glUniform1f(glGetUniformLocation(skirtProg, "uFrill"),
+                        islandFrill);
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, gHeightTex);
             glUniform1i(glGetUniformLocation(skirtProg, "uHeight"), 0);
@@ -2941,6 +2954,8 @@ int main(int argc, char** argv)
                                            0.5f, 6.0f, "%.1f");
                     ImGui::SliderFloat("Island Extrusion", &islandDepth,
                                        0.0f, 30.0f, "%.1f");
+                    ImGui::SliderFloat("Island Frill", &islandFrill,
+                                       0.0f, 1.0f, "%.2f");
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Paint")) {
