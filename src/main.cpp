@@ -631,6 +631,36 @@ static void make_stamps()
         float edge = 0.35f + 0.5f * fabsf(cosf(2.5f * th));
         return SDL_clamp((edge - r) / 0.05f, 0.0f, 1.0f);
     };
+    // Unity's remaining defaults: soft misty splotches, streaks, stars
+    auto softsplotch = [](float u, float v, int seed) {
+        float r = sqrtf(u * u + v * v);
+        float fall = SDL_clamp(1.0f - r, 0.0f, 1.0f);
+        float n = cpu_vnoise(u * 2.3f + seed * 23.1f, v * 2.3f - seed * 7.7f)
+                * 0.6f
+                + cpu_vnoise(u * 5.1f + seed * 3.9f, v * 5.1f - seed * 15.3f)
+                * 0.4f;
+        return SDL_clamp((n - 0.40f) * 2.2f, 0.0f, 1.0f) * fall * fall;
+    };
+    auto streaks = [](float u, float v, int) {
+        float r = sqrtf(u * u + v * v);
+        float fall = SDL_clamp(1.0f - r, 0.0f, 1.0f);
+        float n = cpu_vnoise(u * 9.0f, v * 1.8f) * 0.7f
+                + cpu_vnoise(u * 17.0f + 31.7f, v * 3.1f) * 0.3f;
+        return SDL_clamp((n - 0.48f) * 5.0f, 0.0f, 1.0f) * fall * fall * 1.4f;
+    };
+    auto star6 = [](float u, float v, int) {
+        float r = sqrtf(u * u + v * v);
+        float th = atan2f(v, u);
+        float edge = 0.35f + 0.5f * fabsf(cosf(3.0f * th));
+        return SDL_clamp((edge - r) / 0.05f, 0.0f, 1.0f);
+    };
+    auto starring = [](float u, float v, int) {
+        float r = sqrtf(u * u + v * v);
+        float th = atan2f(v, u);
+        float edge = 0.35f + 0.5f * fabsf(cosf(2.5f * th));
+        float d = fabsf(r - edge);
+        return SDL_clamp((0.05f - d) / 0.03f, 0.0f, 1.0f);
+    };
     add("Soft", soft, 0);
     add("Round", mid, 0);
     add("Hard", hard, 0);
@@ -639,8 +669,14 @@ static void make_stamps()
     add("Splotch 2", splotch, 2);
     add("Splotch 3", splotch, 3);
     add("Splotch 4", splotch, 4);
+    add("Mist 1", softsplotch, 1);
+    add("Mist 2", softsplotch, 2);
+    add("Mist 3", softsplotch, 3);
+    add("Streaks", streaks, 0);
     add("Hexagon", hexagon, 0);
     add("Star", star, 0);
+    add("Star 6", star6, 0);
+    add("Star Ring", starring, 0);
 }
 
 static void apply_brush(BrushMode mode, float cx, float cz, float radius,
