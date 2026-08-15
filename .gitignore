@@ -1,0 +1,9 @@
+# build output
+build/
+
+# textures derived from the Awaii Studio pack (Asset Store EULA:
+# fine in game builds, not redistributable as assets)
+assets/
+
+# local editor state
+map.bin
