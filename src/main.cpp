@@ -476,20 +476,22 @@ static bool ray_terrain(const float ro[3], const float rd[3], float out[3])
 }
 
 enum BrushMode { BRUSH_RAISE, BRUSH_SMOOTH, BRUSH_FLATTEN,
-                 BRUSH_DIRT, BRUSH_DIRT2, BRUSH_GRASS, BRUSH_KILLGRASS };
+                 BRUSH_DIRT, BRUSH_DIRT2, BRUSH_ERASEDIRT,
+                 BRUSH_GRASS, BRUSH_KILLGRASS };
 
-static const float kBrushColors[7][3] = {
+static const float kBrushColors[8][3] = {
     { 1.0f, 0.85f, 0.3f },   // raise: yellow
     { 0.4f, 0.8f, 1.0f },    // smooth: blue
     { 0.9f, 0.5f, 0.9f },    // flatten: purple
     { 0.72f, 0.5f, 0.28f },  // path dirt: brown
     { 0.85f, 0.75f, 0.5f },  // soft dirt: sand
-    { 0.5f, 1.0f, 0.4f },    // grass: green
+    { 0.6f, 0.65f, 0.6f },   // erase dirt: grey
+    { 0.5f, 1.0f, 0.4f },    // grass blades: green
     { 0.9f, 0.35f, 0.3f },   // remove grass: red
 };
-static const char* kBrushNames[7] = { "Sculpt", "Smooth", "Flatten",
-                                      "Path Dirt", "Soft Dirt",
-                                      "Paint Grass", "Remove Grass" };
+static const char* kBrushNames[8] = { "Sculpt", "Smooth", "Flatten",
+                                      "Path Dirt", "Soft Dirt", "Erase Dirt",
+                                      "Grass Blades", "Remove Grass" };
 
 // flatten pulls terrain toward the height captured when the stroke began
 static float gFlattenTarget = 0.0f;
@@ -632,12 +634,13 @@ static void apply_brush(BrushMode mode, float cx, float cz, float radius,
                 } else if (mode == BRUSH_DIRT2) {
                     blend(gMask2[j * MASK_N + i], 255.0f);
                     blend(gMask[j * MASK_N + i], 0.0f);
-                } else if (mode == BRUSH_KILLGRASS) {
-                    blend(gKill[j * MASK_N + i], 255.0f);
-                } else {   // paint grass: restore ground, blades at the
-                           // chosen density shaped by the chosen pattern
+                } else if (mode == BRUSH_ERASEDIRT) {
                     blend(gMask[j * MASK_N + i], 0.0f);
                     blend(gMask2[j * MASK_N + i], 0.0f);
+                } else if (mode == BRUSH_KILLGRASS) {
+                    blend(gKill[j * MASK_N + i], 255.0f);
+                } else {   // grass blades only: density shaped by pattern,
+                           // never touches the painted ground layers
                     float dens = gGrassDensity * grass_pattern(x, z);
                     blend(gKill[j * MASK_N + i], (1.0f - dens) * 255.0f);
                 }
@@ -966,6 +969,7 @@ int main(int argc, char** argv)
                 if (e.key.key == SDLK_5) mode = BRUSH_FLATTEN;
                 if (e.key.key == SDLK_3) mode = BRUSH_DIRT;
                 if (e.key.key == SDLK_4) mode = BRUSH_GRASS;
+                if (e.key.key == SDLK_6) mode = BRUSH_ERASEDIRT;
                 if (e.key.key == SDLK_G) showGrass = !showGrass;
                 if (e.key.key == SDLK_F5) save_map(mapPath);
                 if (e.key.key == SDLK_F9) load_map(mapPath);
