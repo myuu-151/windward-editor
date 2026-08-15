@@ -495,22 +495,29 @@ static bool ray_terrain(const float ro[3], const float rd[3], float out[3])
 }
 
 enum BrushMode { BRUSH_RAISE, BRUSH_SMOOTH, BRUSH_FLATTEN,
+                 BRUSH_SHARPEN, BRUSH_TERRACE,
                  BRUSH_DIRT, BRUSH_DIRT2, BRUSH_ERASEDIRT,
                  BRUSH_GRASS, BRUSH_KILLGRASS };
 
-static const float kBrushColors[8][3] = {
+static const float kBrushColors[10][3] = {
     { 1.0f, 0.85f, 0.3f },   // raise: yellow
     { 0.4f, 0.8f, 1.0f },    // smooth: blue
     { 0.9f, 0.5f, 0.9f },    // flatten: purple
+    { 1.0f, 0.55f, 0.2f },   // sharpen edges: orange
+    { 0.3f, 0.9f, 0.8f },    // terrace: teal
     { 0.72f, 0.5f, 0.28f },  // path dirt: brown
     { 0.85f, 0.75f, 0.5f },  // soft dirt: sand
     { 0.35f, 0.8f, 0.35f },  // grass ground (erases dirt): deep green
     { 0.5f, 1.0f, 0.4f },    // grass blades: bright green
     { 0.9f, 0.35f, 0.3f },   // remove grass: red
 };
-static const char* kBrushNames[8] = { "Sculpt", "Smooth", "Flatten",
-                                      "Path Dirt", "Soft Dirt", "Grass Ground",
-                                      "Grass Blades", "Remove Grass" };
+static const char* kBrushNames[10] = { "Sculpt", "Smooth", "Flatten",
+                                       "Sharpen", "Terrace",
+                                       "Path Dirt", "Soft Dirt", "Grass Ground",
+                                       "Grass Blades", "Remove Grass" };
+
+// terrace step height (world units), set from the panel
+static float gTerraceStep = 2.0f;
 
 // stroke-level undo/redo: whole-state snapshots (~1 MB each, capped)
 struct Snapshot {
@@ -833,7 +840,7 @@ static void apply_brush(BrushMode mode, float cx, float cz, float radius,
                         float dt, bool invert, float strength = 1.0f,
                         float paintTarget = 1.0f)
 {
-    if (mode == BRUSH_RAISE || mode == BRUSH_SMOOTH || mode == BRUSH_FLATTEN) {
+    if (mode <= BRUSH_TERRACE) {
         dt *= strength;
         float cell = 2.0f * TER_HALF / (HN - 1);
         int i0 = SDL_clamp((int)((cx - radius + TER_HALF) / cell), 0, HN - 1);
@@ -841,7 +848,7 @@ static void apply_brush(BrushMode mode, float cx, float cz, float radius,
         int j0 = SDL_clamp((int)((cz - radius + TER_HALF) / cell), 0, HN - 1);
         int j1 = SDL_clamp((int)((cz + radius + TER_HALF) / cell) + 1, 0, HN - 1);
         std::vector<float> snap;
-        if (mode == BRUSH_SMOOTH)
+        if (mode == BRUSH_SMOOTH || mode == BRUSH_SHARPEN)
             snap = gHeights;
         for (int j = j0; j <= j1; j++)
             for (int i = i0; i <= i1; i++) {
@@ -855,6 +862,23 @@ static void apply_brush(BrushMode mode, float cx, float cz, float radius,
                     h += (invert ? -1.0f : 1.0f) * 3.5f * w * dt;
                 } else if (mode == BRUSH_FLATTEN) {
                     h += (gFlattenTarget - h) * SDL_min(1.0f, 12.0f * w * dt);
+                } else if (mode == BRUSH_TERRACE) {
+                    // snap toward stepped plateaus: flat tops, cliff sides
+                    float target = roundf(h / gTerraceStep) * gTerraceStep;
+                    h += (target - h) * SDL_min(1.0f, 10.0f * w * dt);
+                } else if (mode == BRUSH_SHARPEN) {
+                    // unsharp mask: push height away from the local average
+                    // so slopes steepen into defined sides
+                    float sum = 0.0f;
+                    int n = 0;
+                    for (int dj = -2; dj <= 2; dj++)
+                        for (int di = -2; di <= 2; di++) {
+                            int ii = SDL_clamp(i + di, 0, HN - 1);
+                            int jj = SDL_clamp(j + dj, 0, HN - 1);
+                            sum += snap[jj * HN + ii];
+                            n++;
+                        }
+                    h += (h - sum / n) * SDL_min(0.5f, 6.0f * w * dt);
                 } else {
                     float sum = 0.0f;
                     int n = 0;
@@ -1509,21 +1533,32 @@ int main(int argc, char** argv)
             if (ImGui::BeginTabBar("tools")) {
                 if (ImGui::BeginTabItem("Sculpt")) {
                     const char* tools[] = { "Raise or Lower Terrain",
-                                            "Smooth Height", "Flatten" };
-                    ImGui::Combo("##sculpttool", &sculptTool, tools, 3);
+                                            "Smooth Height", "Flatten",
+                                            "Sharpen Edges", "Terrace" };
+                    ImGui::Combo("##sculpttool", &sculptTool, tools, 5);
                     static const char* helps[] = {
                         "Left click to raise.\nHold Shift and left click to "
                         "lower.\nHold Ctrl to smooth.\nHold Alt to flatten.",
                         "Left click to smooth the height.",
                         "Left click to flatten toward the height where the "
                         "stroke began.",
+                        "Left click to steepen slopes into defined sides "
+                        "and edges.",
+                        "Left click to step the terrain into flat plateaus "
+                        "with cliff sides.",
                     };
                     ImGui::TextWrapped("%s", helps[sculptTool]);
-                    mode = sculptTool == 0 ? BRUSH_RAISE
-                         : sculptTool == 1 ? BRUSH_SMOOTH : BRUSH_FLATTEN;
+                    static const BrushMode toolModes[] = {
+                        BRUSH_RAISE, BRUSH_SMOOTH, BRUSH_FLATTEN,
+                        BRUSH_SHARPEN, BRUSH_TERRACE,
+                    };
+                    mode = toolModes[sculptTool];
                     brushGallery();
                     ImGui::SliderFloat("Strength", &brushStrength,
                                        0.1f, 3.0f, "%.1f");
+                    if (mode == BRUSH_TERRACE)
+                        ImGui::SliderFloat("Step Height", &gTerraceStep,
+                                           0.5f, 6.0f, "%.1f");
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Paint")) {
