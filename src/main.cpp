@@ -280,18 +280,21 @@ static const char* PROP_VS = R"(#version 330 core
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNorm;
 layout(location = 2) in vec2 aUv;
+layout(location = 3) in vec3 aVCol;
 uniform mat4 uMvp;
 uniform mat4 uModel;
 out vec3 vNorm;
 out vec2 vUv;
 out float vLocalY;
 out vec3 vWorld;
+out vec3 vVCol;
 void main() {
     vec4 world = uModel * vec4(aPos, 1.0);
     vNorm = mat3(uModel) * aNorm;
     vUv = aUv;
     vLocalY = aPos.y;
     vWorld = world.xyz;
+    vVCol = aVCol;
     gl_Position = uMvp * world;
 }
 )";
@@ -301,6 +304,7 @@ in vec3 vNorm;
 in vec2 vUv;
 in float vLocalY;
 in vec3 vWorld;
+in vec3 vVCol;
 out vec4 fragColor;
 uniform sampler2D uTex;
 uniform vec3 uKd;      // top/main color (the pack's material gradient)
@@ -343,8 +347,10 @@ void main() {
     // the pack colors meshes with a bottom->top material gradient; mask
     // textures only modulate detail
     vec3 grad = mix(uKa, uKd, clamp(vLocalY / max(uBoundH, 0.001), 0.0, 1.0));
-    vec3 col = uGrayMask == 1 ? grad * (0.55 + 0.9 * t.r)
-                              : t.rgb * uKd;
+    // albedo textures are authored final -- material Kd only drives the
+    // gradient tint for mask textures
+    vec3 col = uGrayMask == 1 ? grad * (0.55 + 0.9 * t.r) : t.rgb;
+    col *= vVCol;   // vertex tint (bamboo segments etc.), white when absent
     vec3 L = normalize(vec3(0.35, 0.8, -0.45));
     vec3 n = normalize(vNorm);
     float sf = shadow_factor(vWorld);
@@ -1107,16 +1113,21 @@ static bool load_prop(int idx)
         m.failed = true;
         return false;
     }
-    std::vector<float> vs, ns, ts;
-    std::vector<float> data;   // interleaved pos3 norm3 uv2
+    std::vector<float> vs, ns, ts, vcs;
+    std::vector<float> data;   // interleaved pos3 norm3 uv2 col3
     std::unordered_map<std::string, int> matIndex;
     int curMat = 0;
     char line[512];
     while (fgets(line, sizeof line, f)) {
-        float a, b, c;
+        float a, b, c, r, g, bl;
         char name[256];
-        if (sscanf(line, "v %f %f %f", &a, &b, &c) == 3) {
+        int vn = sscanf(line, "v %f %f %f %f %f %f", &a, &b, &c, &r, &g, &bl);
+        if (line[0] == 'v' && line[1] == ' ' && vn >= 3) {
             vs.insert(vs.end(), { a, b, c });
+            if (vn == 6)
+                vcs.insert(vcs.end(), { r, g, bl });
+            else
+                vcs.insert(vcs.end(), { 1, 1, 1 });
         } else if (sscanf(line, "vn %f %f %f", &a, &b, &c) == 3) {
             ns.insert(ns.end(), { a, b, c });
         } else if (sscanf(line, "vt %f %f", &a, &b) == 2) {
@@ -1128,7 +1139,7 @@ static bool load_prop(int idx)
             auto it = matIndex.find(name);
             curMat = it != matIndex.end() ? it->second : 0;
             if (m.subs.empty() || m.subs.back().count > 0)
-                m.subs.push_back({ (int)(data.size() / 8), 0, curMat });
+                m.subs.push_back({ (int)(data.size() / 11), 0, curMat });
             else
                 m.subs.back().mat = curMat;
         } else if (line[0] == 'f' && line[1] == ' ') {
@@ -1150,6 +1161,8 @@ static bool load_prop(int idx)
                         data.insert(data.end(), { ts[i * 2], ts[i * 2 + 1] });
                     else
                         data.insert(data.end(), { 0, 0 });
+                    data.insert(data.end(),
+                                { vcs[i * 3], vcs[i * 3 + 1], vcs[i * 3 + 2] });
                     float r = sqrtf(px * px + pz * pz);
                     m.boundR = SDL_max(m.boundR, r);
                     m.boundH = SDL_max(m.boundH, py);
@@ -1172,14 +1185,17 @@ static bool load_prop(int idx)
     glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), data.data(),
                  GL_STATIC_DRAW);
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float),
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 11 * sizeof(float),
                           (void*)0);
     glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float),
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 11 * sizeof(float),
                           (void*)(3 * sizeof(float)));
     glEnableVertexAttribArray(2);
-    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float),
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 11 * sizeof(float),
                           (void*)(6 * sizeof(float)));
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, 11 * sizeof(float),
+                          (void*)(8 * sizeof(float)));
     glBindVertexArray(0);
     m.loaded = true;
     return true;
