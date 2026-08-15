@@ -24,6 +24,7 @@
 #include "imgui.h"
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_opengl3.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -100,12 +101,20 @@ void main() {
     float tintN = fbm(vWorld.xz * 0.10);
     grass *= mix(vec3(0.92, 0.96, 0.80), vec3(1.06, 1.05, 0.95), tintN);
 
-    vec3 dirt = texture(uDirtTex, vWorld.xz * 0.22).rgb;
+    // two scales + a swapped-axis second tap so the tile repeat never lines up
+    vec3 dirtA = texture(uDirtTex, vWorld.xz * 0.20).rgb;
+    vec3 dirtB = texture(uDirtTex, vWorld.zx * 0.083 + 0.37).rgb;
+    vec3 dirt = mix(dirtA, dirtB, 0.45);
+    // macro tone variation: sunned cream to packed brown patches
+    dirt *= mix(vec3(0.86, 0.80, 0.68), vec3(1.08, 1.03, 0.92),
+                fbm(vWorld.xz * 0.21));
 
     // noise-broken blend edge: the painted border goes ragged by itself
     float n = fbm(vWorld.xz * 1.1) - 0.5;
     float edge = smoothstep(0.42, 0.58, m + n * 0.38);
     vec3 col = mix(grass, dirt, edge);
+    // soft shadowed band where grass meets dirt grounds the path
+    col *= 1.0 - 0.13 * edge * (1.0 - edge) * 4.0;
 
     // slope-based cliff: triplanar so the rock drapes down sculpted walls
     // instead of smearing (two vertical projections blended by the normal)
@@ -140,6 +149,7 @@ layout(location = 1) in vec4 aInst;    // xz, rot, seed
 uniform mat4 uMvp;
 uniform sampler2D uHeight;
 uniform sampler2D uMask;
+uniform sampler2D uKill;
 uniform float uHalf;
 uniform float uTime;
 out float vV;
@@ -153,7 +163,9 @@ void main() {
     float m = texture(uMask, uv).r;
 
     // no grass on dirt; per-blade threshold jitter makes a soft ragged edge
-    float show = step(m, 0.42 + fract(aInst.w * 7.31) * 0.14);
+    float show = step(m, 0.30 + fract(aInst.w * 7.31) * 0.12);
+    // grass-removal brush channel
+    show *= step(texture(uKill, uv).r, 0.5);
 
     // no grass on cliffs: estimate slope from the heightmap
     float eps = 2.0 * uHalf / 256.0;
@@ -168,8 +180,10 @@ void main() {
     float planeRot = aInst.z + aBlade.z * 1.5707963;
     vec2 dir = vec2(cos(planeRot), sin(planeRot));
 
+    // scale EVERYTHING by show: a hidden blade must not leave a flat
+    // ground-level splat behind (zero height but nonzero width)
     float hgt = (0.28 + fract(aInst.w * 3.17) * 0.30) * show;
-    float wid = 0.035 + fract(aInst.w * 5.71) * 0.02;
+    float wid = (0.035 + fract(aInst.w * 5.71) * 0.02) * show;
 
     vec3 p = vec3(xz.x, ground, xz.y);
     p.xz += dir * aBlade.x * wid * (1.0 - aBlade.y * 0.7);
@@ -390,8 +404,9 @@ static void save_screenshot(SDL_Window* win, const char* path)
 
 static std::vector<float>   gHeights(HN* HN, 0.0f);
 static std::vector<Uint8>   gMask(MASK_N* MASK_N, 0);   // 0 grass .. 255 dirt
-static GLuint gHeightTex = 0, gMaskTex = 0;
-static bool gHeightsDirty = true, gMaskDirty = true;
+static std::vector<Uint8>   gKill(MASK_N* MASK_N, 0);   // 255 = no blades
+static GLuint gHeightTex = 0, gMaskTex = 0, gKillTex = 0;
+static bool gHeightsDirty = true, gMaskDirty = true, gKillDirty = true;
 
 static float height_at(float x, float z)
 {
@@ -442,20 +457,60 @@ static bool ray_terrain(const float ro[3], const float rd[3], float out[3])
     return false;
 }
 
-enum BrushMode { BRUSH_RAISE, BRUSH_SMOOTH, BRUSH_FLATTEN, BRUSH_DIRT, BRUSH_GRASS };
+enum BrushMode { BRUSH_RAISE, BRUSH_SMOOTH, BRUSH_FLATTEN,
+                 BRUSH_DIRT, BRUSH_GRASS, BRUSH_KILLGRASS };
 
-static const float kBrushColors[5][3] = {
+static const float kBrushColors[6][3] = {
     { 1.0f, 0.85f, 0.3f },   // raise: yellow
     { 0.4f, 0.8f, 1.0f },    // smooth: blue
     { 0.9f, 0.5f, 0.9f },    // flatten: purple
     { 0.72f, 0.5f, 0.28f },  // dirt: brown
     { 0.5f, 1.0f, 0.4f },    // grass: green
+    { 0.9f, 0.35f, 0.3f },   // remove grass: red
 };
-static const char* kBrushNames[5] = { "Sculpt", "Smooth", "Flatten",
-                                      "Paint Dirt", "Paint Grass" };
+static const char* kBrushNames[6] = { "Sculpt", "Smooth", "Flatten",
+                                      "Paint Dirt", "Paint Grass",
+                                      "Remove Grass" };
 
 // flatten pulls terrain toward the height captured when the stroke began
 static float gFlattenTarget = 0.0f;
+
+// UE-style brush falloff presets
+enum Falloff { FALLOFF_SMOOTH, FALLOFF_LINEAR, FALLOFF_SPHERE, FALLOFF_TIP };
+static int gFalloff = FALLOFF_SMOOTH;
+static const char* kFalloffNames[] = { "Smooth", "Linear", "Sphere", "Tip" };
+
+static float falloff_weight(float dOverR)
+{
+    float t = SDL_clamp(1.0f - dOverR, 0.0f, 1.0f);
+    switch (gFalloff) {
+    case FALLOFF_LINEAR: return t;
+    case FALLOFF_SPHERE: return sqrtf(SDL_max(0.0f, 1.0f - dOverR * dOverR));
+    case FALLOFF_TIP:    return t * t;
+    default:             return t * t * (3.0f - 2.0f * t);
+    }
+}
+
+// brush shapes: circle, square, and a speckled "noise" alpha stamp
+enum BrushShape { SHAPE_CIRCLE, SHAPE_SQUARE, SHAPE_NOISE };
+static int gShape = SHAPE_CIRCLE;
+static const char* kShapeNames[] = { "Circle", "Square", "Noise" };
+
+static float brush_weight(float dx, float dz, float radius, float wx, float wz)
+{
+    float d = (gShape == SHAPE_SQUARE)
+                  ? SDL_max(fabsf(dx), fabsf(dz))
+                  : sqrtf(dx * dx + dz * dz);
+    if (d > radius)
+        return 0.0f;
+    float w = falloff_weight(d / radius);
+    if (gShape == SHAPE_NOISE) {
+        float n = sinf(wx * 12.9898f + wz * 78.233f) * 43758.5453f;
+        n -= floorf(n);
+        w *= 0.15f + 0.85f * n * n;
+    }
+    return w;
+}
 
 static void apply_brush(BrushMode mode, float cx, float cz, float radius,
                         float dt, bool invert, float strength = 1.0f)
@@ -474,11 +529,9 @@ static void apply_brush(BrushMode mode, float cx, float cz, float radius,
             for (int i = i0; i <= i1; i++) {
                 float x = -TER_HALF + i * cell;
                 float z = -TER_HALF + j * cell;
-                float d = sqrtf((x - cx) * (x - cx) + (z - cz) * (z - cz));
-                if (d > radius)
+                float w = brush_weight(x - cx, z - cz, radius, x, z);
+                if (w <= 0.0f)
                     continue;
-                float w = 1.0f - d / radius;
-                w = w * w * (3.0f - 2.0f * w);
                 float& h = gHeights[j * HN + i];
                 if (mode == BRUSH_RAISE) {
                     h += (invert ? -1.0f : 1.0f) * 3.5f * w * dt;
@@ -504,21 +557,28 @@ static void apply_brush(BrushMode mode, float cx, float cz, float radius,
         int i1 = SDL_clamp((int)((cx + radius + TER_HALF) / cell) + 1, 0, MASK_N - 1);
         int j0 = SDL_clamp((int)((cz - radius + TER_HALF) / cell), 0, MASK_N - 1);
         int j1 = SDL_clamp((int)((cz + radius + TER_HALF) / cell) + 1, 0, MASK_N - 1);
-        float target = (mode == BRUSH_DIRT) ? 255.0f : 0.0f;
         for (int j = j0; j <= j1; j++)
             for (int i = i0; i <= i1; i++) {
                 float x = -TER_HALF + (i + 0.5f) * cell;
                 float z = -TER_HALF + (j + 0.5f) * cell;
-                float d = sqrtf((x - cx) * (x - cx) + (z - cz) * (z - cz));
-                if (d > radius)
+                float w = brush_weight(x - cx, z - cz, radius, x, z);
+                if (w <= 0.0f)
                     continue;
-                float w = 1.0f - d / radius;
-                w = w * w * (3.0f - 2.0f * w);
-                Uint8& m = gMask[j * MASK_N + i];
-                float v = m + (target - m) * SDL_min(1.0f, 10.0f * w * dt);
-                m = (Uint8)SDL_clamp((int)(v + 0.5f), 0, 255);
+                float rate = SDL_min(1.0f, 10.0f * w * dt);
+                auto blend = [rate](Uint8& v, float target) {
+                    float nv = v + (target - v) * rate;
+                    v = (Uint8)SDL_clamp((int)(nv + 0.5f), 0, 255);
+                };
+                if (mode == BRUSH_DIRT)
+                    blend(gMask[j * MASK_N + i], 255.0f);
+                else if (mode == BRUSH_KILLGRASS)
+                    blend(gKill[j * MASK_N + i], 255.0f);
+                else {   // paint grass restores ground AND blades
+                    blend(gMask[j * MASK_N + i], 0.0f);
+                    blend(gKill[j * MASK_N + i], 0.0f);
+                }
             }
-        gMaskDirty = true;
+        gMaskDirty = gKillDirty = true;
     }
 }
 
@@ -538,6 +598,13 @@ static void upload_dirty()
                      GL_UNSIGNED_BYTE, gMask.data());
         gMaskDirty = false;
     }
+    if (gKillDirty) {
+        glBindTexture(GL_TEXTURE_2D, gKillTex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, MASK_N, MASK_N, 0, GL_RED,
+                     GL_UNSIGNED_BYTE, gKill.data());
+        gKillDirty = false;
+    }
 }
 
 static void save_map(const char* path)
@@ -547,10 +614,11 @@ static void save_map(const char* path)
         SDL_Log("save failed: %s", path);
         return;
     }
-    const char magic[8] = { 'T','E','R','M','A','P','0','1' };
+    const char magic[8] = { 'T','E','R','M','A','P','0','2' };
     fwrite(magic, 1, 8, f);
     fwrite(gHeights.data(), sizeof(float), gHeights.size(), f);
     fwrite(gMask.data(), 1, gMask.size(), f);
+    fwrite(gKill.data(), 1, gKill.size(), f);
     fclose(f);
     SDL_Log("saved %s", path);
 }
@@ -561,14 +629,18 @@ static bool load_map(const char* path)
     if (!f)
         return false;
     char magic[8];
-    if (fread(magic, 1, 8, f) != 8 || memcmp(magic, "TERMAP01", 8) != 0) {
+    if (fread(magic, 1, 8, f) != 8 || memcmp(magic, "TERMAP0", 7) != 0) {
         fclose(f);
         return false;
     }
     fread(gHeights.data(), sizeof(float), gHeights.size(), f);
     fread(gMask.data(), 1, gMask.size(), f);
+    if (magic[7] >= '2')
+        fread(gKill.data(), 1, gKill.size(), f);
+    else
+        std::fill(gKill.begin(), gKill.end(), (Uint8)0);
     fclose(f);
-    gHeightsDirty = gMaskDirty = true;
+    gHeightsDirty = gMaskDirty = gKillDirty = true;
     SDL_Log("loaded %s", path);
     return true;
 }
@@ -707,6 +779,12 @@ int main(int argc, char** argv)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glGenTextures(1, &gMaskTex);
     glBindTexture(GL_TEXTURE_2D, gMaskTex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glGenTextures(1, &gKillTex);
+    glBindTexture(GL_TEXTURE_2D, gKillTex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -951,6 +1029,9 @@ int main(int argc, char** argv)
             glActiveTexture(GL_TEXTURE2);
             glBindTexture(GL_TEXTURE_2D, grassTex);
             glUniform1i(glGetUniformLocation(grassProg, "uGrassTex"), 2);
+            glActiveTexture(GL_TEXTURE3);
+            glBindTexture(GL_TEXTURE_2D, gKillTex);
+            glUniform1i(glGetUniformLocation(grassProg, "uKill"), 3);
             glDisable(GL_CULL_FACE);
             glBindVertexArray(grassVao);
             glDrawArraysInstanced(GL_TRIANGLES, 0, 12, instCount);
@@ -987,7 +1068,7 @@ int main(int argc, char** argv)
                 ImGui::TextDisabled("hold Shift to lower");
 
             ImGui::SeparatorText("Paint");
-            for (int i = BRUSH_DIRT; i <= BRUSH_GRASS; i++) {
+            for (int i = BRUSH_DIRT; i <= BRUSH_KILLGRASS; i++) {
                 ImGui::PushStyleColor(ImGuiCol_Text,
                     ImVec4(kBrushColors[i][0], kBrushColors[i][1],
                            kBrushColors[i][2], 1.0f));
@@ -999,6 +1080,8 @@ int main(int argc, char** argv)
             ImGui::SeparatorText("Brush");
             ImGui::SliderFloat("Radius", &brushRadius, 0.4f, 10.0f, "%.1f");
             ImGui::SliderFloat("Strength", &brushStrength, 0.1f, 3.0f, "%.1f");
+            ImGui::Combo("Shape", &gShape, kShapeNames, 3);
+            ImGui::Combo("Falloff", &gFalloff, kFalloffNames, 4);
 
             ImGui::SeparatorText("View");
             ImGui::Checkbox("Grass", &showGrass);
