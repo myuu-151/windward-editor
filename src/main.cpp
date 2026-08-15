@@ -507,6 +507,48 @@ static const char* kBrushNames[8] = { "Sculpt", "Smooth", "Flatten",
                                       "Path Dirt", "Soft Dirt", "Grass Ground",
                                       "Grass Blades", "Remove Grass" };
 
+// stroke-level undo/redo: whole-state snapshots (~1 MB each, capped)
+struct Snapshot {
+    std::vector<float> h;
+    std::vector<Uint8> m, m2, k;
+};
+static std::vector<Snapshot> gUndoStack, gRedoStack;
+
+static void mark_all_dirty()
+{
+    gHeightsDirty = gMaskDirty = gMask2Dirty = gKillDirty = true;
+}
+
+static void push_undo()
+{
+    gUndoStack.push_back({ gHeights, gMask, gMask2, gKill });
+    if (gUndoStack.size() > 32)
+        gUndoStack.erase(gUndoStack.begin());
+    gRedoStack.clear();
+}
+
+static void do_undo()
+{
+    if (gUndoStack.empty())
+        return;
+    gRedoStack.push_back({ gHeights, gMask, gMask2, gKill });
+    const Snapshot& s = gUndoStack.back();
+    gHeights = s.h; gMask = s.m; gMask2 = s.m2; gKill = s.k;
+    gUndoStack.pop_back();
+    mark_all_dirty();
+}
+
+static void do_redo()
+{
+    if (gRedoStack.empty())
+        return;
+    gUndoStack.push_back({ gHeights, gMask, gMask2, gKill });
+    const Snapshot& s = gRedoStack.back();
+    gHeights = s.h; gMask = s.m; gMask2 = s.m2; gKill = s.k;
+    gRedoStack.pop_back();
+    mark_all_dirty();
+}
+
 // flatten pulls terrain toward the height captured when the stroke began
 static float gFlattenTarget = 0.0f;
 
@@ -1191,6 +1233,11 @@ int main(int argc, char** argv)
                 if (e.key.key == SDLK_4) mode = BRUSH_GRASS;
                 if (e.key.key == SDLK_6) mode = BRUSH_ERASEDIRT;
                 if (e.key.key == SDLK_G) showGrass = !showGrass;
+                if (e.key.key == SDLK_Z && (e.key.mod & SDL_KMOD_CTRL)) {
+                    if (e.key.mod & SDL_KMOD_SHIFT) do_redo(); else do_undo();
+                }
+                if (e.key.key == SDLK_Y && (e.key.mod & SDL_KMOD_CTRL))
+                    do_redo();
                 if (e.key.key == SDLK_F5) save_map(mapPath);
                 if (e.key.key == SDLK_F9) load_map(mapPath);
                 if (e.key.key == SDLK_LEFTBRACKET)
@@ -1275,6 +1322,8 @@ int main(int argc, char** argv)
                 hasHit = false;   // cursor over the panel: never paint through
             bool painting = hasHit && (mb & SDL_BUTTON_LMASK) && !shotPath;
             if (painting) {
+                if (!wasPainting)
+                    push_undo();   // one undo step per stroke
                 // sculpt modifiers: Ctrl smooths, Alt flattens
                 BrushMode active = mode;
                 if (mode == BRUSH_RAISE) {
