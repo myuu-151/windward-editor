@@ -488,6 +488,34 @@ void main() {
 }
 )";
 
+// scale reference: a Link-sized figure. He stands ~1.1 units tall in the
+// client and the client scales editor islands 2x, so he is 0.55 units
+// here -- drop him anywhere to judge island proportions.
+static const char* DUMMY_VS = R"(#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aCol;
+uniform mat4 uMvp;
+uniform vec3 uPos;
+out vec3 vCol;
+out vec3 vNrm;
+void main() {
+    vCol = aCol;
+    vNrm = normalize(aPos - vec3(0.0, aPos.y, 0.0) + vec3(0.0, 0.35, 0.0));
+    gl_Position = uMvp * vec4(aPos + uPos, 1.0);
+}
+)";
+
+static const char* DUMMY_FS = R"(#version 330 core
+in vec3 vCol;
+in vec3 vNrm;
+out vec4 fragColor;
+void main() {
+    vec3 L = normalize(vec3(0.35, 0.8, -0.45));
+    float d = 0.72 + 0.38 * max(dot(normalize(vNrm), L), 0.0);
+    fragColor = vec4(vCol * d, 1.0);
+}
+)";
+
 // world waterline: a simple ocean plane marking sea level
 static const char* WATER_VS = R"(#version 330 core
 const vec2 verts[6] = vec2[6](vec2(-1,-1), vec2(1,-1), vec2(-1,1),
@@ -2176,6 +2204,53 @@ int main(int argc, char** argv)
     GLuint emptyVao = 0;
     glGenVertexArrays(1, &emptyVao);
 
+    // Link-scale reference dummy (0.55 units = his client height / 2)
+    GLuint dummyProg = make_program(DUMMY_VS, DUMMY_FS);
+    GLuint dummyVao = 0, dummyVbo = 0;
+    int dummyVerts = 0;
+    {
+        std::vector<float> dv;
+        auto box = [&dv](float x0, float y0, float z0, float x1, float y1,
+                         float z1, float r, float g, float b) {
+            const float c[8][3] = {
+                { x0, y0, z0 }, { x1, y0, z0 }, { x1, y1, z0 }, { x0, y1, z0 },
+                { x0, y0, z1 }, { x1, y0, z1 }, { x1, y1, z1 }, { x0, y1, z1 },
+            };
+            const int f[12][3] = {
+                {0,1,2},{0,2,3}, {5,4,7},{5,7,6}, {4,0,3},{4,3,7},
+                {1,5,6},{1,6,2}, {3,2,6},{3,6,7}, {4,5,1},{4,1,0},
+            };
+            for (auto& t : f)
+                for (int k = 0; k < 3; k++) {
+                    dv.insert(dv.end(), c[t[k]], c[t[k]] + 3);
+                    dv.insert(dv.end(), { r, g, b });
+                }
+        };
+        const float H = 0.55f;              // total height
+        box(-0.085f, 0.0f, -0.05f, -0.02f, H * 0.42f, 0.05f,
+            0.93f, 0.93f, 0.90f);           // legs
+        box(0.02f, 0.0f, -0.05f, 0.085f, H * 0.42f, 0.05f,
+            0.93f, 0.93f, 0.90f);
+        box(-0.10f, H * 0.40f, -0.07f, 0.10f, H * 0.72f, 0.07f,
+            0.20f, 0.55f, 0.22f);           // tunic
+        box(-0.075f, H * 0.72f, -0.06f, 0.075f, H * 0.90f, 0.06f,
+            0.95f, 0.85f, 0.70f);           // head
+        box(-0.08f, H * 0.88f, -0.065f, 0.08f, H, 0.065f,
+            0.25f, 0.62f, 0.28f);           // cap
+        dummyVerts = (int)dv.size() / 6;
+        glGenVertexArrays(1, &dummyVao);
+        glGenBuffers(1, &dummyVbo);
+        glBindVertexArray(dummyVao);
+        glBindBuffer(GL_ARRAY_BUFFER, dummyVbo);
+        glBufferData(GL_ARRAY_BUFFER, dv.size() * sizeof(float), dv.data(),
+                     GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 24, (void*)0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 24, (void*)12);
+        glBindVertexArray(0);
+    }
+
     // island skirt geometry: perimeter ring (rim + bottom verts) + cap
     GLuint skirtProg = make_program(SKIRT_VS, SKIRT_FS);
     GLuint skirtVao = 0, skirtVbo = 0, skirtIbo = 0;
@@ -2235,6 +2310,8 @@ int main(int argc, char** argv)
     float bladeDensity = 0.8f;
     bool showGrass = true;
     bool shadowsOn = true;
+    bool showDummy = false;             // Link-scale reference figure
+    float dummyPos[2] = { 0.0f, 0.0f }; // placed with the brush cursor
     float grassShadowDark = 0.55f;   // blade brightness inside shadow
     float groundAO = 0.0f;           // contact AO strength under blades
     float aoRadius = 2.5f;           // AO spread (mip level)
@@ -2777,6 +2854,19 @@ int main(int argc, char** argv)
                            nullptr);
         }
 
+        // Link-scale reference figure
+        if (showDummy) {
+            glUseProgram(dummyProg);
+            glUniformMatrix4fv(glGetUniformLocation(dummyProg, "uMvp"), 1,
+                               GL_FALSE, mvp.m);
+            float dp[3] = { dummyPos[0],
+                            height_at(dummyPos[0], dummyPos[1]),
+                            dummyPos[1] };
+            glUniform3fv(glGetUniformLocation(dummyProg, "uPos"), 1, dp);
+            glBindVertexArray(dummyVao);
+            glDrawArrays(GL_TRIANGLES, 0, dummyVerts);
+        }
+
         // ocean plane at the waterline
         if (gShowWater) {
             static GLuint waterProg = make_program(WATER_VS, WATER_FS);
@@ -2965,6 +3055,16 @@ int main(int argc, char** argv)
                                        0.0f, 1.0f, "%.2f");
                     ImGui::SliderFloat("Island Bulge", &islandBulge,
                                        0.0f, 1.0f, "%.2f");
+                    ImGui::SeparatorText("Scale Reference");
+                    ImGui::Checkbox("Link Dummy", &showDummy);
+                    if (showDummy) {
+                        ImGui::TextDisabled("Link's height in game "
+                                            "(2x world scale)");
+                        if (ImGui::Button("Move to Cursor") && hasHit) {
+                            dummyPos[0] = hit[0];
+                            dummyPos[1] = hit[2];
+                        }
+                    }
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Paint")) {
