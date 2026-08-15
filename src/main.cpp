@@ -114,7 +114,7 @@ void main() {
     // soft dirt layer: calmer clearing material, gentler variation
     float m2 = texture(uMask2, maskUv).r;
     vec3 soft = texture(uDirt2Tex, vWorld.xz * 0.15).rgb;
-    soft *= mix(vec3(0.90, 0.85, 0.74), vec3(1.06, 1.02, 0.93),
+    soft *= mix(vec3(0.96, 0.94, 0.88), vec3(1.05, 1.03, 0.98),
                 fbm(vWorld.xz * 0.17 + 5.1));
 
     // noise-broken blend edges: painted borders go ragged by themselves
@@ -124,8 +124,9 @@ void main() {
     vec3 col = mix(grass, dirt, edge);
     col = mix(col, soft, edge2);
     // soft shadowed band where grass meets dirt grounds the path
-    float rim = max(edge * (1.0 - edge), edge2 * (1.0 - edge2));
-    col *= 1.0 - 0.13 * rim * 4.0;
+    // (path dirt gets the full band, soft dirt only a whisper)
+    col *= (1.0 - 0.13 * edge * (1.0 - edge) * 4.0) *
+           (1.0 - 0.05 * edge2 * (1.0 - edge2) * 4.0);
 
     // slope-based cliff: triplanar so the rock drapes down sculpted walls
     // instead of smearing (two vertical projections blended by the normal)
