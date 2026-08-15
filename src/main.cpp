@@ -488,12 +488,12 @@ static const float kBrushColors[8][3] = {
     { 0.9f, 0.5f, 0.9f },    // flatten: purple
     { 0.72f, 0.5f, 0.28f },  // path dirt: brown
     { 0.85f, 0.75f, 0.5f },  // soft dirt: sand
-    { 0.6f, 0.65f, 0.6f },   // erase dirt: grey
-    { 0.5f, 1.0f, 0.4f },    // grass blades: green
+    { 0.35f, 0.8f, 0.35f },  // grass ground (erases dirt): deep green
+    { 0.5f, 1.0f, 0.4f },    // grass blades: bright green
     { 0.9f, 0.35f, 0.3f },   // remove grass: red
 };
 static const char* kBrushNames[8] = { "Sculpt", "Smooth", "Flatten",
-                                      "Path Dirt", "Soft Dirt", "Erase Dirt",
+                                      "Path Dirt", "Soft Dirt", "Grass Ground",
                                       "Grass Blades", "Remove Grass" };
 
 // flatten pulls terrain toward the height captured when the stroke began
