@@ -944,35 +944,54 @@ static float cpu_vnoise(float x, float y);
 // Sink the map's rim below the waterline so the island ends in sea
 // instead of a square plateau: a noisy radial falloff from the edge.
 // (A square of land casts a square shadow and gets no foam ring.)
-static void taper_edges_to_sea(float widthFrac, float seaLevel, bool radial,
-                               float drop)
+// Live, non-destructive shoreline: the sliders always rebuild the rim
+// from a pristine snapshot, so dragging them never compounds.
+struct ShoreParams {
+    float width = 0.06f;    // rim fraction that becomes shore
+    float drop = 1.0f;      // how far under the waterline the border sits
+    float frill = 0.35f;    // raggedness of the coastline
+    float smoothing = 0.5f; // 0 = abrupt cliff, 1 = gradual beach
+    bool  radial = false;   // round the footprint instead of even inset
+    bool  on = false;
+};
+static ShoreParams gShore;
+static std::vector<float> gShoreBase;   // heights before any shoreline
+
+static void apply_shoreline(float seaLevel)
 {
+    if (gShoreBase.size() != gHeights.size())
+        return;
+    if (!gShore.on) {
+        gHeights = gShoreBase;
+        gHeightsDirty = true;
+        return;
+    }
     const float cell = 2.0f * TER_HALF / (HN - 1);
-    const float band = SDL_max(0.005f, widthFrac);
+    const float band = SDL_max(0.005f, gShore.width);
+    // low smoothing keeps the drop near the border (cliffy), high
+    // smoothing spreads it inland (beachy)
+    const float curve = 0.25f + gShore.smoothing * 2.75f;
     for (int j = 0; j < HN; j++)
         for (int i = 0; i < HN; i++) {
             float x = -TER_HALF + cell * i;
             float z = -TER_HALF + cell * j;
-            // rim distance, 0 at the boundary and 1 at the center. Radial
-            // mode rounds the footprint (trims the corners), box mode
-            // pulls the whole perimeter in evenly.
+            // rim distance: 0 at the boundary, 1 inland
             float rim;
-            if (radial) {
-                float r = sqrtf(x * x + z * z) / TER_HALF;
-                rim = 1.0f - r;
+            if (gShore.radial) {
+                rim = 1.0f - sqrtf(x * x + z * z) / TER_HALF;
             } else {
                 rim = SDL_min(1.0f - fabsf(x) / TER_HALF,
                               1.0f - fabsf(z) / TER_HALF);
             }
-            // wobble scaled BY the band, so a narrow shore stays narrow
-            float wob = (cpu_vnoise(x * 0.09f, z * 0.09f) - 0.5f) * 0.55f +
-                        (cpu_vnoise(x * 0.31f, z * 0.31f) - 0.5f) * 0.22f;
+            // wobble scaled by the band so a narrow shore stays narrow
+            float wob = ((cpu_vnoise(x * 0.09f, z * 0.09f) - 0.5f) * 1.6f +
+                         (cpu_vnoise(x * 0.31f, z * 0.31f) - 0.5f) * 0.7f) *
+                        gShore.frill;
             float t = SDL_clamp((rim + wob * band) / band, 0.0f, 1.0f);
-            t = t * t * (3.0f - 2.0f * t);
-            float& h = gHeights[j * HN + i];
-            // just under the sea at the border, untouched inland: only go
-            // as deep as needed, so the cut reads as shore not chasm
-            h = SDL_min(h, h * t + (seaLevel - drop) * (1.0f - t));
+            t = powf(t * t * (3.0f - 2.0f * t), curve);
+            float base = gShoreBase[j * HN + i];
+            gHeights[j * HN + i] =
+                SDL_min(base, base * t + (seaLevel - gShore.drop) * (1.0f - t));
         }
     gHeightsDirty = true;
 }
@@ -2382,9 +2401,6 @@ int main(int argc, char** argv)
     float islandDepth = 0.0f;        // skirt extrusion below the terrain
     float islandFrill = 0.0f;        // scalloped underside silhouette
     float islandBulge = 0.0f;        // underside pushed outward past rim
-    float shoreWidth = 0.06f;        // rim fraction tapered into the sea
-    bool shoreRadial = false;        // round the footprint vs even inset
-    float shoreDrop = 1.0f;          // how far under the waterline the rim goes
     // prop tools
     int activeTab = 0;          // 0 sculpt, 1 paint, 2 details, 3 props
     int sculptTool = 0, paintLayer = 0, detailTool = 0;
@@ -3131,20 +3147,35 @@ int main(int argc, char** argv)
                     ImGui::SliderFloat("Island Bulge", &islandBulge,
                                        0.0f, 1.0f, "%.2f");
                     ImGui::SeparatorText("Shoreline");
-                    ImGui::SliderFloat("Shore Width", &shoreWidth,
-                                       0.01f, 0.6f, "%.3f",
-                                       ImGuiSliderFlags_Logarithmic);
-                    ImGui::SliderFloat("Shore Drop", &shoreDrop,
-                                       0.3f, 8.0f, "%.1f");
-                    ImGui::Checkbox("Round Footprint", &shoreRadial);
-                    if (ImGui::Button("Taper Edges to Sea")) {
-                        push_undo();
-                        taper_edges_to_sea(shoreWidth, gWaterline,
-                                           shoreRadial, shoreDrop);
+                    bool shoreDirty = false;
+                    if (ImGui::Checkbox("Shoreline", &gShore.on)) {
+                        if (gShoreBase.size() != gHeights.size()) {
+                            push_undo();
+                            gShoreBase = gHeights;
+                        }
+                        shoreDirty = true;
                     }
-                    ImGui::TextDisabled(shoreRadial
-                        ? "rounds the island, trimming the corners"
-                        : "sinks the rim evenly into the sea");
+                    if (gShore.on) {
+                        shoreDirty |= ImGui::SliderFloat(
+                            "Width", &gShore.width, 0.01f, 0.6f, "%.3f",
+                            ImGuiSliderFlags_Logarithmic);
+                        shoreDirty |= ImGui::SliderFloat(
+                            "Frill", &gShore.frill, 0.0f, 1.5f, "%.2f");
+                        shoreDirty |= ImGui::SliderFloat(
+                            "Smooth", &gShore.smoothing, 0.0f, 1.0f, "%.2f");
+                        shoreDirty |= ImGui::SliderFloat(
+                            "Drop", &gShore.drop, 0.3f, 8.0f, "%.1f");
+                        shoreDirty |= ImGui::Checkbox("Round Footprint",
+                                                      &gShore.radial);
+                        if (ImGui::Button("Bake into Terrain")) {
+                            gShoreBase.clear();   // keep it, drop the undo
+                            gShore.on = false;
+                        }
+                        ImGui::TextDisabled("live: sliders rebuild the rim\n"
+                                            "from the original heights");
+                    }
+                    if (shoreDirty)
+                        apply_shoreline(gWaterline);
                     ImGui::SeparatorText("Scale Reference");
                     if (ImGui::Checkbox("Link Dummy", &showDummy) &&
                         showDummy) {
