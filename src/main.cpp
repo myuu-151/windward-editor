@@ -940,7 +940,8 @@ static float cpu_vnoise(float x, float y);
 // Sink the map's rim below the waterline so the island ends in sea
 // instead of a square plateau: a noisy radial falloff from the edge.
 // (A square of land casts a square shadow and gets no foam ring.)
-static void taper_edges_to_sea(float widthFrac, float seaLevel, bool radial)
+static void taper_edges_to_sea(float widthFrac, float seaLevel, bool radial,
+                               float drop)
 {
     const float cell = 2.0f * TER_HALF / (HN - 1);
     const float band = SDL_max(0.005f, widthFrac);
@@ -965,8 +966,9 @@ static void taper_edges_to_sea(float widthFrac, float seaLevel, bool radial)
             float t = SDL_clamp((rim + wob * band) / band, 0.0f, 1.0f);
             t = t * t * (3.0f - 2.0f * t);
             float& h = gHeights[j * HN + i];
-            // below the sea by a good margin at the border, untouched inland
-            h = h * t + (seaLevel - 4.0f) * (1.0f - t);
+            // just under the sea at the border, untouched inland: only go
+            // as deep as needed, so the cut reads as shore not chasm
+            h = SDL_min(h, h * t + (seaLevel - drop) * (1.0f - t));
         }
     gHeightsDirty = true;
 }
@@ -2361,6 +2363,7 @@ int main(int argc, char** argv)
     float islandBulge = 0.0f;        // underside pushed outward past rim
     float shoreWidth = 0.06f;        // rim fraction tapered into the sea
     bool shoreRadial = false;        // round the footprint vs even inset
+    float shoreDrop = 1.0f;          // how far under the waterline the rim goes
     // prop tools
     int activeTab = 0;          // 0 sculpt, 1 paint, 2 details, 3 props
     int sculptTool = 0, paintLayer = 0, detailTool = 0;
@@ -3104,11 +3107,13 @@ int main(int argc, char** argv)
                     ImGui::SliderFloat("Shore Width", &shoreWidth,
                                        0.01f, 0.6f, "%.3f",
                                        ImGuiSliderFlags_Logarithmic);
+                    ImGui::SliderFloat("Shore Drop", &shoreDrop,
+                                       0.3f, 8.0f, "%.1f");
                     ImGui::Checkbox("Round Footprint", &shoreRadial);
                     if (ImGui::Button("Taper Edges to Sea")) {
                         push_undo();
                         taper_edges_to_sea(shoreWidth, gWaterline,
-                                           shoreRadial);
+                                           shoreRadial, shoreDrop);
                     }
                     ImGui::TextDisabled(shoreRadial
                         ? "rounds the island, trimming the corners"
