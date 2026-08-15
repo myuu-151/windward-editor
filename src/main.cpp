@@ -633,6 +633,10 @@ static void make_stamps()
                 * 0.35f;
         return SDL_clamp((n - 0.45f) * 4.0f, 0.0f, 1.0f) * fall * fall * 1.6f;
     };
+    auto square = [](float u, float v, int) {
+        float d = SDL_max(fabsf(u), fabsf(v));
+        return SDL_clamp((0.90f - d) / 0.06f, 0.0f, 1.0f);
+    };
     auto hexagon = [](float u, float v, int) {
         float ax = fabsf(u), ay = fabsf(v);
         float d = SDL_max(ax * 0.866025f + ay * 0.5f, ay);
@@ -686,6 +690,7 @@ static void make_stamps()
     add("Mist 2", softsplotch, 2);
     add("Mist 3", softsplotch, 3);
     add("Streaks", streaks, 0);
+    add("Square", square, 0);
     add("Hexagon", hexagon, 0);
     add("Star", star, 0);
     add("Star 6", star6, 0);
@@ -1272,7 +1277,11 @@ int main(int argc, char** argv)
             if (painting) {
                 if (!wasPainting && mode == BRUSH_FLATTEN)
                     gFlattenTarget = height_at(hit[0], hit[2]);
-                apply_brush(mode, hit[0], hit[2], brushRadius, dt,
+                // Ctrl while sculpting switches to smoothing, Unity-style
+                BrushMode active = mode;
+                if (mode == BRUSH_RAISE && keys[SDL_SCANCODE_LCTRL])
+                    active = BRUSH_SMOOTH;
+                apply_brush(active, hit[0], hit[2], brushRadius, dt,
                             keys[SDL_SCANCODE_LSHIFT] != 0, brushStrength);
             }
             wasPainting = painting;
@@ -1414,7 +1423,8 @@ int main(int argc, char** argv)
                                             "Smooth Height", "Flatten" };
                     ImGui::Combo("##sculpttool", &sculptTool, tools, 3);
                     static const char* helps[] = {
-                        "Left click to raise.\nHold Shift and left click to lower.",
+                        "Left click to raise.\nHold Shift and left click to "
+                        "lower.\nHold Ctrl to smooth.",
                         "Left click to smooth the height.",
                         "Left click to flatten toward the height where the "
                         "stroke began.",
