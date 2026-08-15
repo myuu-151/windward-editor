@@ -2142,6 +2142,7 @@ int main(int argc, char** argv)
         camPos[0] = 4.5f; camPos[1] = 7.0f; camPos[2] = 33.0f;
     } else {
         load_map(mapPath);
+        applySettingsIn();   // startup load must restore the sliders too
     }
 
     SDL_Log("RMB=look WASD/QE=fly LMB=brush wheel=radius "
