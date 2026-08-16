@@ -1975,11 +1975,52 @@ static void gen_carve_paths(float seaLevel)
         // Here the road's HEIGHT falls smoothly as it goes round, and the
         // radius is wherever the ground currently stands at that height,
         // so it climbs the hill as one unbroken shelf.
+        // Read the contour off a SMOOTHED copy of the terrain. On a
+        // terraced hill a riser is near vertical, so the radius at which
+        // the ground stands at a given height barely moves through it --
+        // the road gets pinned to the rock face and reads as part of the
+        // cliff. Smoothed, each riser is the slope it stands for, the
+        // radius advances steadily, and the carve notches the road
+        // through the lip the way a real hill road crosses a bench.
+        const int SN = SDL_clamp(HN / 3, 64, 192);
+        std::vector<float> sm((size_t)SN * SN);
+        for (int j = 0; j < SN; j++)
+            for (int i = 0; i < SN; i++) {
+                float x = -TER_HALF + 2.0f * TER_HALF * i / (SN - 1);
+                float z = -TER_HALF + 2.0f * TER_HALF * j / (SN - 1);
+                sm[(size_t)j * SN + i] = height_at(x, z);
+            }
+        for (int pass = 0; pass < 8; pass++) {
+            std::vector<float> t = sm;
+            for (int j = 1; j < SN - 1; j++)
+                for (int i = 1; i < SN - 1; i++)
+                    sm[(size_t)j * SN + i] =
+                        (t[(size_t)j * SN + i] * 4.0f +
+                         t[(size_t)j * SN + i - 1] + t[(size_t)j * SN + i + 1] +
+                         t[(size_t)(j - 1) * SN + i] + t[(size_t)(j + 1) * SN + i]) *
+                        0.125f;
+        }
+        auto smooth_at = [&](float x, float z) {
+            float u = (x + TER_HALF) / (2.0f * TER_HALF) * (SN - 1);
+            float v = (z + TER_HALF) / (2.0f * TER_HALF) * (SN - 1);
+            int i0 = SDL_clamp((int)u, 0, SN - 2), j0 = SDL_clamp((int)v, 0, SN - 2);
+            float fu = SDL_clamp(u - i0, 0.0f, 1.0f);
+            float fv = SDL_clamp(v - j0, 0.0f, 1.0f);
+            float a = sm[(size_t)j0 * SN + i0], b = sm[(size_t)j0 * SN + i0 + 1];
+            float c = sm[(size_t)(j0 + 1) * SN + i0];
+            float d = sm[(size_t)(j0 + 1) * SN + i0 + 1];
+            return (a * (1 - fu) + b * fu) * (1 - fv) +
+                   (c * (1 - fu) + d * fu) * fv;
+        };
+        float smTop = -1e9f;
+        for (float v2 : sm)
+            if (v2 > smTop) smTop = v2;
+
         std::vector<float> sxs, szs;
         const float turn = SDL_max(0.05f, g.spiralTurn);
         const float dropPerRad = stepH / (turn * 6.2831853f);
         const float dA = 0.05f;
-        float ang = 0.0f, lv = bestH - stepH * 0.35f;
+        float ang = 0.0f, lv = smTop - stepH * 0.35f;
         int guard = 0;
         while (lv > seaLevel + stepH * 0.4f && guard++ < 40000) {
             float dx = cosf(ang), dz = sinf(ang);
@@ -1991,7 +2032,7 @@ static void gen_carve_paths(float seaLevel)
                 float x = cx0 + dx * r, z = cz0 + dz * r;
                 if (fabsf(x) > TER_HALF || fabsf(z) > TER_HALF)
                     break;
-                if (height_at(x, z) < lv)
+                if (smooth_at(x, z) < lv)
                     break;              // the ground has fallen below us
                 found = r;
             }
@@ -4020,7 +4061,9 @@ int main(int argc, char** argv)
         simTime = 7.0;
         yaw = 0.0f;
         pitch = -1.45f;            // very nearly straight down
-        camPos[0] = 0.0f; camPos[1] = TER_HALF * 2.05f; camPos[2] = 0.6f;
+        camPos[0] = 0.0f;
+        camPos[1] = TER_HALF * 2.05f + gGen.height * 1.6f;
+        camPos[2] = 0.6f;
     } else if (shotPath) {
         stamp_demo_scene();
         simTime = 7.0;
