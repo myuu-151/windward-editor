@@ -1396,32 +1396,32 @@ static void apply_shoreline(float seaLevel)
 // until you bake it.
 struct GenParams {
     int   seed = 19430;
-    float size = 1.10f;      // island radius, fraction of the map half
-    float coast = 0.24f;     // width of the falloff into the sea
-    float lumps = 0.0f;     // how much the coastline radius wanders
-    float warp = 0.50f;      // domain warp: bends the whole shape organic
-    float height = 8.9f;    // peak land height in world units
-    float rough = 0.0f;     // terrain noise vs a smooth dome
-    int   detail = 6;        // fbm octaves
-    float fscale = 1.66f;    // feature frequency
-    float ridge = 0.43f;      // billowy blobs .. sharp mountain spines
-    int   peaks = 4;         // seeded summits on top of the noise
-    float peakH = 0.78f;
+    float size = 1.07f;      // island radius, fraction of the map half
+    float coast = 0.05f;     // width of the falloff into the sea
+    float lumps = 0.24f;     // how much the coastline radius wanders
+    float warp = 0.47f;      // domain warp: bends the whole shape organic
+    float height = 14.3f;    // peak land height in world units
+    float rough = 0.44f;     // terrain noise vs a smooth dome
+    int   detail = 3;        // fbm octaves
+    float fscale = 1.48f;    // feature frequency
+    float ridge = 0.30f;      // billowy blobs .. sharp mountain spines
+    int   peaks = 2;         // seeded summits on top of the noise
+    float peakH = 0.84f;
     float peakSpread = 0.5f; // how far the summits sit from the centre
-    float plateau = 0.75f;   // soft ceiling: mesa tops
-    float terr = 0.9f;       // terrace step height, 0 = off
-    float beach = 0.33f;     // widens the gentle land near the water
+    float plateau = 0.46f;   // soft ceiling: mesa tops
+    float terr = 2.1f;       // terrace step height, 0 = off
+    float beach = 0.31f;     // widens the gentle land near the water
     float drop = 2.0f;       // sea floor depth outside the island
     // ---- level layout: the parts that make an island playable rather
     // ---- than just scenery
     int   flats = 2;         // flat clearings to build on
     float flatSize = 0.20f;  // clearing radius, fraction of island radius
-    float flatFlat = 0.9f;   // how completely a clearing is levelled
+    float flatFlat = 1.0f;   // how completely a clearing is levelled
     bool  paths = true;      // trails linking the clearings and the shore
-    float pathWidth = 1.7f;  // world units
-    float pathWander = 0.0f;
-    float pathCut = 0.78f;   // how firmly a trail levels the ground it crosses
-    float pathGrade = 0.32f; // steepest climb a trail will accept
+    float pathWidth = 2.5f;  // world units
+    float pathWander = 0.02f;
+    float pathCut = 0.73f;   // how firmly a trail levels the ground it crosses
+    float pathGrade = 0.31f; // steepest climb a trail will accept
     float pathBank = 3.0f;   // slope of the cut/fill banks beside the tread
     float pathCling = 1.0f;  // 0 = cut across the terrain, 1 = wind around it
     bool  pathPaint = true;  // lay dirt (and clear grass) along the trails
@@ -2907,19 +2907,49 @@ struct TuneBlob {
     float islandFrill = 0.0f;
     float islandBulge = 0.0f;
     // island generator (appended: older maps just get the defaults)
-    int   genSeed = 1337, genDetail = 5, genPeaks = 2, genAdd = 0, genOn = 0;
-    float genSize = 0.62f, genCoast = 0.38f, genLumps = 0.45f, genWarp = 0.5f;
-    float genHeight = 8.0f, genRough = 0.55f, genScale = 3.2f, genRidge = 0.3f;
-    float genPeakH = 0.7f, genSpread = 0.5f, genPlateau = 0.0f;
-    float genTerr = 0.0f, genBeach = 0.3f, genDrop = 2.0f;
+    // Every generator default comes from GenParams itself. Written out
+    // by hand they went stale the moment the generator's own defaults
+    // moved, and since loading a map fills the sliders from here, that
+    // handed back the OLD defaults on any map saved before these fields
+    // existed.
+    int   genSeed = GenParams().seed;
+    int   genDetail = GenParams().detail;
+    int   genPeaks = GenParams().peaks;
+    int   genAdd = GenParams().add ? 1 : 0;
+    int   genOn = 0;
+    float genSize = GenParams().size;
+    float genCoast = GenParams().coast;
+    float genLumps = GenParams().lumps;
+    float genWarp = GenParams().warp;
+    float genHeight = GenParams().height;
+    float genRough = GenParams().rough;
+    float genScale = GenParams().fscale;
+    float genRidge = GenParams().ridge;
+    float genPeakH = GenParams().peakH;
+    float genSpread = GenParams().peakSpread;
+    float genPlateau = GenParams().plateau;
+    float genTerr = GenParams().terr;
+    float genBeach = GenParams().beach;
+    float genDrop = GenParams().drop;
     int   autoGrow = 1;
     int   trimSkirt = 0;
-    int   genFlats = 3, genPaths = 1, genPathPaint = 1, genShorePath = 1;
-    int   genSummitPath = 1, genPathLayer = 1, genSpiral = 1;
-    float genSpiralTurn = 0.45f, genSpiralInset = 0.6f;
-    float genFlatSize = 0.20f, genFlatFlat = 0.9f;
-    float genPathWidth = 2.2f, genPathWander = 0.5f, genPathCut = 0.85f;
-    float genPathGrade = 0.30f, genPathBank = 0.9f, genPathCling = 1.0f;
+    int   genFlats = GenParams().flats;
+    int   genPaths = GenParams().paths ? 1 : 0;
+    int   genPathPaint = GenParams().pathPaint ? 1 : 0;
+    int   genShorePath = GenParams().shorePath ? 1 : 0;
+    int   genSummitPath = GenParams().summitPath ? 1 : 0;
+    int   genPathLayer = GenParams().pathLayer;
+    int   genSpiral = GenParams().spiralRoad ? 1 : 0;
+    float genSpiralTurn = GenParams().spiralTurn;
+    float genSpiralInset = GenParams().spiralInset;
+    float genFlatSize = GenParams().flatSize;
+    float genFlatFlat = GenParams().flatFlat;
+    float genPathWidth = GenParams().pathWidth;
+    float genPathWander = GenParams().pathWander;
+    float genPathCut = GenParams().pathCut;
+    float genPathGrade = GenParams().pathGrade;
+    float genPathBank = GenParams().pathBank;
+    float genPathCling = GenParams().pathCling;
 };
 static TuneBlob gTune;
 static bool gLoadedTune = false;
