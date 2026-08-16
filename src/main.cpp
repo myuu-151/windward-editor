@@ -1018,6 +1018,7 @@ static std::vector<Snapshot> gUndoStack, gRedoStack;
 
 static std::vector<float> gShoreBase;   // heights before any shoreline
 static std::vector<float> gGenBase;     // heights before the generator
+static std::vector<Uint8> gGenMask, gGenMask2, gGenKill;   // and its paint
 static void mark_all_dirty();
 static float cpu_vnoise(float x, float y);
 static void push_undo();
@@ -1391,6 +1392,17 @@ struct GenParams {
     float terr = 0.0f;       // terrace step height, 0 = off
     float beach = 0.3f;      // widens the gentle land near the water
     float drop = 2.0f;       // sea floor depth outside the island
+    // ---- level layout: the parts that make an island playable rather
+    // ---- than just scenery
+    int   flats = 3;         // flat clearings to build on
+    float flatSize = 0.20f;  // clearing radius, fraction of island radius
+    float flatFlat = 0.9f;   // how completely a clearing is levelled
+    bool  paths = true;      // trails linking the clearings and the shore
+    float pathWidth = 2.2f;  // world units
+    float pathWander = 0.5f;
+    float pathCut = 0.85f;   // how firmly a trail levels the ground it crosses
+    bool  pathPaint = true;  // lay dirt (and clear grass) along the trails
+    bool  shorePath = true;  // run one trail down to a landing beach
     bool  add = false;       // layer over the existing sculpt
     bool  on = false;
 };
@@ -1431,7 +1443,7 @@ static float gen_detail(float u, float v)
 // Land height and coverage at a normalized position. mask is 1 inland,
 // 0 out at sea, so callers can either replace the terrain (blend down to
 // the sea floor) or add the land on top of what is already there.
-static float gen_land(float u, float v, float* maskOut)
+static float gen_land_raw(float u, float v, float* maskOut)
 {
     const GenParams& g = gGen;
     float so = g.seed * 0.7913f;
@@ -1481,13 +1493,188 @@ static float gen_land(float u, float v, float* maskOut)
         float b = SDL_clamp(mask / SDL_max(0.05f, g.beach * 0.7f), 0.0f, 1.0f);
         h *= b * b * (3.0f - 2.0f * b);
     }
-    if (g.terr > 0.01f) {
-        float step = g.terr / SDL_max(0.5f, g.height);
-        h = roundf(h / step) * step;
-    }
     if (maskOut)
         *maskOut = mask;
     return h * g.height * mask;
+}
+
+// Clearings: seeded flat shelves that give an island somewhere to put a
+// village, a shrine or a fight. Positions are stable for a seed.
+struct GenFlat { float u, v, r; };
+// cached for the duration of one regenerate: gen_land runs per cell, and
+// rebuilding this list a million times would dominate the whole pass
+static std::vector<GenFlat> gFlatCache;
+static void gen_flats(std::vector<GenFlat>& out)
+{
+    out.clear();
+    const GenParams& g = gGen;
+    for (int i = 0; i < g.flats; i++) {
+        float a = cpu_vnoise(g.seed * 0.013f + i * 3.1f, i * 5.7f) * 6.2831853f;
+        float d = 0.18f + cpu_vnoise(i * 2.9f, g.seed * 0.023f) * 0.62f;
+        float rr = 0.7f + cpu_vnoise(i * 7.3f, g.seed * 0.007f) * 0.6f;
+        out.push_back({ cosf(a) * d * g.size * 0.8f,
+                        sinf(a) * d * g.size * 0.8f,
+                        SDL_max(0.02f, g.flatSize * g.size * rr) });
+    }
+}
+
+// The land with the level layout applied. Clearings are levelled first,
+// then terracing quantizes in WORLD height -- doing it before the coast
+// mask (as this used to) meant multiplying the steps by a continuous
+// falloff, which smoothed them straight back out. That is why terraces
+// never read.
+static float gen_land(float u, float v, float* maskOut)
+{
+    const GenParams& g = gGen;
+    float mask = 0.0f;
+    float land = gen_land_raw(u, v, &mask);
+
+    if (g.flats > 0 && g.flatFlat > 0.0f) {
+        for (const GenFlat& f : gFlatCache) {
+            float dx = u - f.u, dz = v - f.v;
+            float d = sqrtf(dx * dx + dz * dz) / f.r;
+            if (d >= 1.0f)
+                continue;
+            float w = 1.0f - SDL_clamp((d - 0.55f) / 0.45f, 0.0f, 1.0f);
+            w = w * w * (3.0f - 2.0f * w);
+            float target = gen_land_raw(f.u, f.v, nullptr);
+            land += (target - land) * w * g.flatFlat;
+        }
+    }
+    if (g.terr > 0.01f && land > g.terr * 0.9f) {
+        // leave the beach band continuous so the shoreline is not a wall
+        land = floorf(land / g.terr) * g.terr;
+    }
+    if (maskOut)
+        *maskOut = mask;
+    return land;
+}
+
+// ---- trails
+// A path is routed between the clearings, then down to a landing beach.
+// Rather than cutting a straight ramp between two heights -- which gouges
+// a trench across anything in the way -- it samples the ground it crosses
+// and SMOOTHS that profile, so the trail follows the land at a walkable
+// grade and only cuts where the ground is genuinely too steep.
+static void gen_carve_paths(float seaLevel)
+{
+    const GenParams& g = gGen;
+    if (!g.paths || gHeights.empty())
+        return;
+    std::vector<GenFlat> flats;
+    gen_flats(flats);
+
+    struct Node { float x, z; };
+    std::vector<Node> nodes;
+    for (const GenFlat& f : flats)
+        nodes.push_back({ f.u * TER_HALF, f.v * TER_HALF });
+    if (nodes.size() < 2 && !g.shorePath)
+        return;
+    if (g.shorePath) {
+        // walk outward from the last clearing until the land runs out,
+        // and land the trail on that beach
+        float ax = nodes.empty() ? 0.0f : nodes.back().x;
+        float az = nodes.empty() ? 0.0f : nodes.back().z;
+        float len = sqrtf(ax * ax + az * az);
+        float dx = len > 0.001f ? ax / len : 1.0f;
+        float dz = len > 0.001f ? az / len : 0.0f;
+        float bestX = ax, bestZ = az;
+        for (float r = len; r < TER_HALF * 1.5f; r += TER_HALF * 0.01f) {
+            float x = dx * r, z = dz * r;
+            if (fabsf(x) > TER_HALF || fabsf(z) > TER_HALF)
+                break;
+            if (height_at(x, z) <= seaLevel + 0.15f)
+                break;
+            bestX = x; bestZ = z;
+        }
+        nodes.push_back({ bestX, bestZ });
+    }
+    if (nodes.size() < 2)
+        return;
+
+    const float cell = 2.0f * TER_HALF / (HN - 1);
+    const float mcell = 2.0f * TER_HALF / MASK_N;
+    const float halfW = SDL_max(0.4f, g.pathWidth * 0.5f);
+    const float so = g.seed * 0.7913f;
+
+    for (size_t n = 0; n + 1 < nodes.size(); n++) {
+        float ax = nodes[n].x, az = nodes[n].z;
+        float bx = nodes[n + 1].x, bz = nodes[n + 1].z;
+        float dx = bx - ax, dz = bz - az;
+        float len = sqrtf(dx * dx + dz * dz);
+        if (len < cell * 2.0f)
+            continue;
+        int steps = SDL_max(8, (int)(len / (cell * 0.5f)));
+        float px = -dz / len, pz = dx / len;   // lateral
+
+        std::vector<float> ptx(steps + 1), ptz(steps + 1), pth(steps + 1);
+        for (int i = 0; i <= steps; i++) {
+            float t = (float)i / steps;
+            // wander, tapering to zero at both ends so it still arrives
+            float env = sinf(t * 3.14159f);
+            float w = ((cpu_vnoise(t * 3.1f + so, so * 2.0f) - 0.5f) * 2.0f +
+                       (cpu_vnoise(t * 7.7f - so, so) - 0.5f)) *
+                      g.pathWander * len * 0.18f * env;
+            float x = ax + dx * t + px * w;
+            float z = az + dz * t + pz * w;
+            ptx[i] = SDL_clamp(x, -TER_HALF + cell, TER_HALF - cell);
+            ptz[i] = SDL_clamp(z, -TER_HALF + cell, TER_HALF - cell);
+            pth[i] = height_at(ptx[i], ptz[i]);
+        }
+        // smooth the profile into a walkable grade
+        for (int pass = 0; pass < 24; pass++) {
+            std::vector<float> t = pth;
+            for (int i = 1; i < steps; i++)
+                pth[i] = (t[i - 1] + 2.0f * t[i] + t[i + 1]) * 0.25f;
+        }
+
+        for (int i = 0; i <= steps; i++) {
+            float cx = ptx[i], cz = ptz[i], ch = pth[i];
+            // carve the corridor toward the trail height
+            int i0 = SDL_clamp((int)((cx - halfW * 1.6f + TER_HALF) / cell), 0, HN - 1);
+            int i1 = SDL_clamp((int)((cx + halfW * 1.6f + TER_HALF) / cell) + 1, 0, HN - 1);
+            int j0 = SDL_clamp((int)((cz - halfW * 1.6f + TER_HALF) / cell), 0, HN - 1);
+            int j1 = SDL_clamp((int)((cz + halfW * 1.6f + TER_HALF) / cell) + 1, 0, HN - 1);
+            for (int j = j0; j <= j1; j++)
+                for (int ii = i0; ii <= i1; ii++) {
+                    float x = -TER_HALF + ii * cell, z = -TER_HALF + j * cell;
+                    float d = sqrtf((x - cx) * (x - cx) + (z - cz) * (z - cz)) /
+                              (halfW * 1.6f);
+                    if (d >= 1.0f)
+                        continue;
+                    float w = 1.0f - SDL_clamp((d - 0.35f) / 0.65f, 0.0f, 1.0f);
+                    w = w * w * (3.0f - 2.0f * w);
+                    float& h = gHeights[(size_t)j * HN + ii];
+                    h += (ch - h) * w * g.pathCut;
+                }
+            if (!g.pathPaint)
+                continue;
+            // lay the dirt, and clear blades off the tread
+            int mi0 = SDL_clamp((int)((cx - halfW + TER_HALF) / mcell), 0, MASK_N - 1);
+            int mi1 = SDL_clamp((int)((cx + halfW + TER_HALF) / mcell) + 1, 0, MASK_N - 1);
+            int mj0 = SDL_clamp((int)((cz - halfW + TER_HALF) / mcell), 0, MASK_N - 1);
+            int mj1 = SDL_clamp((int)((cz + halfW + TER_HALF) / mcell) + 1, 0, MASK_N - 1);
+            for (int j = mj0; j <= mj1; j++)
+                for (int ii = mi0; ii <= mi1; ii++) {
+                    float x = -TER_HALF + (ii + 0.5f) * mcell;
+                    float z = -TER_HALF + (j + 0.5f) * mcell;
+                    float d = sqrtf((x - cx) * (x - cx) + (z - cz) * (z - cz)) /
+                              halfW;
+                    if (d >= 1.0f)
+                        continue;
+                    // ragged edge, so the trail is not a clean stripe
+                    float e = 1.0f - d + (cpu_vnoise(x * 0.7f, z * 0.7f) - 0.5f) * 0.5f;
+                    if (e <= 0.05f)
+                        continue;
+                    Uint8 v = (Uint8)SDL_clamp(e * 320.0f, 0.0f, 255.0f);
+                    Uint8& m = gMask[(size_t)j * MASK_N + ii];
+                    if (v > m) m = v;
+                    Uint8& k = gKill[(size_t)j * MASK_N + ii];
+                    if (v > k) k = v;   // 255 = no blades
+                }
+        }
+    }
+    gHeightsDirty = gMaskDirty = gKillDirty = true;
 }
 
 // Rebuild the terrain from the generator. Non-destructive: always starts
@@ -1496,11 +1683,23 @@ static void apply_generator(float seaLevel)
 {
     if (gGenBase.size() != gHeights.size())
         return;
+    // paint is restored too: the generator lays trails into the masks,
+    // so regenerating has to start from clean ones or every drag of a
+    // slider would stack another set of paths on the last
+    auto restore_paint = [&]() {
+        if (gGenMask.size() == gMask.size()) gMask = gGenMask;
+        if (gGenMask2.size() == gMask2.size()) gMask2 = gGenMask2;
+        if (gGenKill.size() == gKill.size()) gKill = gGenKill;
+        gMaskDirty = gMask2Dirty = gKillDirty = true;
+    };
     if (!gGen.on) {
         gHeights = gGenBase;
+        restore_paint();
         gHeightsDirty = true;
         return;
     }
+    restore_paint();
+    gen_flats(gFlatCache);
     const float cell = 2.0f * TER_HALF / (HN - 1);
     for (int j = 0; j < HN; j++)
         for (int i = 0; i < HN; i++) {
@@ -1513,6 +1712,7 @@ static void apply_generator(float seaLevel)
                 gGen.add ? base + land
                          : land * mask + (seaLevel - gGen.drop) * (1.0f - mask);
         }
+    gen_carve_paths(seaLevel);
     gHeightsDirty = true;
 }
 
@@ -2358,6 +2558,9 @@ struct TuneBlob {
     float genTerr = 0.0f, genBeach = 0.3f, genDrop = 2.0f;
     int   autoGrow = 1;
     int   trimSkirt = 0;
+    int   genFlats = 3, genPaths = 1, genPathPaint = 1, genShorePath = 1;
+    float genFlatSize = 0.20f, genFlatFlat = 0.9f;
+    float genPathWidth = 2.2f, genPathWander = 0.5f, genPathCut = 0.85f;
 };
 static TuneBlob gTune;
 static bool gLoadedTune = false;
@@ -3304,6 +3507,15 @@ int main(int argc, char** argv)
         gTune.genBeach = gGen.beach;    gTune.genDrop = gGen.drop;
         gTune.autoGrow = autoGrow ? 1 : 0;
         gTune.trimSkirt = trimSkirt ? 1 : 0;
+        gTune.genFlats = gGen.flats;
+        gTune.genPaths = gGen.paths ? 1 : 0;
+        gTune.genPathPaint = gGen.pathPaint ? 1 : 0;
+        gTune.genShorePath = gGen.shorePath ? 1 : 0;
+        gTune.genFlatSize = gGen.flatSize;
+        gTune.genFlatFlat = gGen.flatFlat;
+        gTune.genPathWidth = gGen.pathWidth;
+        gTune.genPathWander = gGen.pathWander;
+        gTune.genPathCut = gGen.pathCut;
         memset(gTune.propSelId, 0, sizeof gTune.propSelId);
         if (propSel >= 0 && propSel < (int)gPropMeshes.size())
             SDL_strlcpy(gTune.propSelId,
@@ -3367,6 +3579,15 @@ int main(int argc, char** argv)
             gGen.beach = gTune.genBeach;    gGen.drop = gTune.genDrop;
             autoGrow = gTune.autoGrow != 0;
             trimSkirt = gTune.trimSkirt != 0;
+            gGen.flats = SDL_clamp(gTune.genFlats, 0, 6);
+            gGen.paths = gTune.genPaths != 0;
+            gGen.pathPaint = gTune.genPathPaint != 0;
+            gGen.shorePath = gTune.genShorePath != 0;
+            gGen.flatSize = gTune.genFlatSize;
+            gGen.flatFlat = gTune.genFlatFlat;
+            gGen.pathWidth = gTune.genPathWidth;
+            gGen.pathWander = gTune.genPathWander;
+            gGen.pathCut = gTune.genPathCut;
             if (gTune.propSelId[0]) {
                 for (int mi = 0; mi < (int)gPropMeshes.size(); mi++)
                     if (mesh_id(gPropMeshes[mi]) == gTune.propSelId) {
@@ -4235,6 +4456,8 @@ int main(int argc, char** argv)
                         if (gGenBase.size() != gHeights.size()) {
                             push_undo();
                             gGenBase = gHeights;
+                            gGenMask = gMask; gGenMask2 = gMask2;
+                            gGenKill = gKill;
                         }
                         genDirty = true;
                     }
@@ -4301,6 +4524,41 @@ int main(int argc, char** argv)
                                                        &gGen.beach, 0.0f, 1.5f,
                                                        "%.2f");
 
+                        ImGui::SeparatorText("Level Layout");
+                        genDirty |= ImGui::SliderInt("Clearings",
+                                                     &gGen.flats, 0, 6);
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Flat shelves levelled into the "
+                                              "terrain -- somewhere to put a "
+                                              "village, a shrine, a fight.");
+                        genDirty |= ImGui::SliderFloat("Clearing Size",
+                                                       &gGen.flatSize, 0.05f,
+                                                       0.5f, "%.2f");
+                        genDirty |= ImGui::SliderFloat("Clearing Flatness",
+                                                       &gGen.flatFlat, 0.0f,
+                                                       1.0f, "%.2f");
+                        genDirty |= ImGui::Checkbox("Trails", &gGen.paths);
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Routes a path between the "
+                                              "clearings, following the "
+                                              "ground at a walkable grade "
+                                              "instead of cutting a ramp "
+                                              "straight through it.");
+                        if (gGen.paths) {
+                            genDirty |= ImGui::SliderFloat("Trail Width",
+                                                           &gGen.pathWidth,
+                                                           0.6f, 8.0f, "%.1f");
+                            genDirty |= ImGui::SliderFloat("Trail Wander",
+                                                           &gGen.pathWander,
+                                                           0.0f, 1.5f, "%.2f");
+                            genDirty |= ImGui::SliderFloat("Trail Cut",
+                                                           &gGen.pathCut, 0.0f,
+                                                           1.0f, "%.2f");
+                            genDirty |= ImGui::Checkbox("Paint Dirt",
+                                                        &gGen.pathPaint);
+                            genDirty |= ImGui::Checkbox("Trail to Beach",
+                                                        &gGen.shorePath);
+                        }
                         ImGui::SeparatorText("Apply");
                         genDirty |= ImGui::Checkbox("Layer Over Sculpt",
                                                     &gGen.add);
@@ -4311,6 +4569,8 @@ int main(int argc, char** argv)
                                               "entirely.");
                         if (ImGui::Button("Bake into Terrain")) {
                             gGenBase.clear();   // keep the result, drop revert
+                            gGenMask.clear(); gGenMask2.clear();
+                            gGenKill.clear();
                             gGen.on = false;
                             gShoreBase.clear();
                         }
