@@ -1396,40 +1396,40 @@ static void apply_shoreline(float seaLevel)
 // until you bake it.
 struct GenParams {
     int   seed = 19430;
-    float size = 1.07f;      // island radius, fraction of the map half
-    float coast = 0.05f;     // width of the falloff into the sea
-    float lumps = 0.24f;     // how much the coastline radius wanders
-    float warp = 0.47f;      // domain warp: bends the whole shape organic
-    float height = 14.3f;    // peak land height in world units
-    float rough = 0.44f;     // terrain noise vs a smooth dome
+    float size = 1.10f;      // island radius, fraction of the map half
+    float coast = 0.44f;     // width of the falloff into the sea
+    float lumps = 0.11f;     // how much the coastline radius wanders
+    float warp = 0.25f;      // domain warp: bends the whole shape organic
+    float height = 28.3f;    // peak land height in world units
+    float rough = 0.65f;     // terrain noise vs a smooth dome
     int   detail = 3;        // fbm octaves
     float fscale = 1.48f;    // feature frequency
     float ridge = 0.30f;      // billowy blobs .. sharp mountain spines
     int   peaks = 2;         // seeded summits on top of the noise
-    float peakH = 0.84f;
+    float peakH = 1.17f;
     float peakSpread = 0.5f; // how far the summits sit from the centre
     float plateau = 0.46f;   // soft ceiling: mesa tops
-    float terr = 2.1f;       // terrace step height, 0 = off
-    float beach = 0.31f;     // widens the gentle land near the water
-    float drop = 2.0f;       // sea floor depth outside the island
+    float terr = 3.2f;       // terrace step height, 0 = off
+    float beach = 0.58f;     // widens the gentle land near the water
+    float drop = 12.0f;       // sea floor depth outside the island
     // ---- level layout: the parts that make an island playable rather
     // ---- than just scenery
     int   flats = 2;         // flat clearings to build on
     float flatSize = 0.20f;  // clearing radius, fraction of island radius
     float flatFlat = 1.0f;   // how completely a clearing is levelled
     bool  paths = true;      // trails linking the clearings and the shore
-    float pathWidth = 2.5f;  // world units
-    float pathWander = 0.02f;
-    float pathCut = 0.73f;   // how firmly a trail levels the ground it crosses
-    float pathGrade = 0.31f; // steepest climb a trail will accept
+    float pathWidth = 1.9f;  // world units
+    float pathWander = 0.77f;
+    float pathCut = 0.76f;   // how firmly a trail levels the ground it crosses
+    float pathGrade = 0.56f; // steepest climb a trail will accept
     float pathBank = 3.0f;   // slope of the cut/fill banks beside the tread
-    float pathCling = 1.0f;  // 0 = cut across the terrain, 1 = wind around it
+    float pathCling = 0.28f;  // 0 = cut across the terrain, 1 = wind around it
     bool  pathPaint = true;  // lay dirt (and clear grass) along the trails
     int   pathLayer = 1;     // 0 = path dirt (brown), 1 = soft dirt (sand)
     bool  spiralRoad = true; // a road wrapping the terraces to the summit
-    float spiralTurn = 0.45f; // turns of the hill gained per terrace
-    float spiralInset = 0.6f;// how far back from each drop the road sits
-    bool  shorePath = true;  // run one trail down to a landing beach
+    float spiralTurn = 0.26f; // turns of the hill gained per terrace
+    float spiralInset = 0.0f;// how far back from each drop the road sits
+    bool  shorePath = false;  // run one trail down to a landing beach
     bool  summitPath = true; // and one up to the island's high point
     bool  add = false;       // layer over the existing sculpt
     bool  on = false;
