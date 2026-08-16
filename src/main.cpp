@@ -519,6 +519,8 @@ uniform float uHalf;
 uniform float uDepth;
 uniform float uFrill;   // lateral noise on the underside silhouette
 uniform float uBulge;   // pushes the underside outward past the rim
+uniform vec2  uCenter;  // the island's centre: bulge and the bottom cap
+                        // pivot here, not on the world origin
 out vec3 vWorld;
 out vec3 vNormal;
 out float vT;
@@ -548,14 +550,16 @@ void main() {
         float f1 = vnoise(xz * 0.45 + 11.0) - 0.5;
         float f2 = vnoise(xz * 1.3 + 7.0) - 0.5;
         float taper = mix(0.82, 1.30, uBulge) + (f1 * 0.5 + f2 * 0.2) * uFrill;
-        pos = vec3(xz.x * taper,
+        vec2 d = xz - uCenter;
+        pos = vec3(uCenter.x + d.x * taper,
                    -uDepth * (0.55 + 0.5 * n + f2 * 0.5 * uFrill),
-                   xz.y * taper);
+                   uCenter.y + d.y * taper);
     } else {
-        pos = vec3(0.0, -uDepth * 1.25, 0.0);
+        pos = vec3(uCenter.x, -uDepth * 1.25, uCenter.y);
     }
     vWorld = pos;
-    vNormal = normalize(vec3(xz.x, uDepth * 0.02 + 6.0, xz.y));
+    vNormal = normalize(vec3(xz.x - uCenter.x, uDepth * 0.02 + 6.0,
+                             xz.y - uCenter.y));
     if (t > 1.5)
         vNormal = vec3(0.0, -1.0, 0.0);
     vT = min(t, 1.5);
@@ -2353,6 +2357,7 @@ struct TuneBlob {
     float genPeakH = 0.7f, genSpread = 0.5f, genPlateau = 0.0f;
     float genTerr = 0.0f, genBeach = 0.3f, genDrop = 2.0f;
     int   autoGrow = 1;
+    int   trimSkirt = 0;
 };
 static TuneBlob gTune;
 static bool gLoadedTune = false;
@@ -3090,6 +3095,9 @@ int main(int argc, char** argv)
 
     // island skirt geometry: perimeter ring (rim + bottom verts) + cap
     GLuint skirtProg = make_program(SKIRT_VS, SKIRT_FS);
+    // trim the underside to the island's own coastline instead of the
+    // whole map square
+    bool trimSkirt = false;
     GLuint skirtVao = 0, skirtVbo = 0, skirtIbo = 0;
     int skirtIdxCount = 0;
     // The skirt rings the map's perimeter, so it has to follow the world
@@ -3097,22 +3105,86 @@ int main(int argc, char** argv)
     // bounds. Rebuilt whenever the extent or the grid changes.
     float skirtHalf = 0.0f;
     int skirtGrid = 0;
+    float skirtCenter[2] = { 0.0f, 0.0f };
+    bool skirtWasTrimmed = false;
     auto build_skirt = [&]() {
         skirtHalf = TER_HALF;
         skirtGrid = GRID_N;
+        skirtWasTrimmed = trimSkirt;
+        skirtCenter[0] = skirtCenter[1] = 0.0f;
         std::vector<float> ring;   // perimeter xz positions, CCW
-        for (int i = 0; i < GRID_N; i++)
-            ring.insert(ring.end(),
-                { -TER_HALF + 2.0f * TER_HALF * i / GRID_N, -TER_HALF });
-        for (int j = 0; j < GRID_N; j++)
-            ring.insert(ring.end(),
-                { TER_HALF, -TER_HALF + 2.0f * TER_HALF * j / GRID_N });
-        for (int i = GRID_N; i > 0; i--)
-            ring.insert(ring.end(),
-                { -TER_HALF + 2.0f * TER_HALF * i / GRID_N, TER_HALF });
-        for (int j = GRID_N; j > 0; j--)
-            ring.insert(ring.end(),
-                { -TER_HALF, -TER_HALF + 2.0f * TER_HALF * j / GRID_N });
+        bool trimmed = false;
+        if (trimSkirt) {
+            // Trace the island's own coastline and hang the underside off
+            // THAT instead of the map's square perimeter: the shape below
+            // the water then matches the shape above it, with no block of
+            // rock filling the rest of the map.
+            const float cell = 2.0f * TER_HALF / (HN - 1);
+            const float sea = gWaterline + 0.05f;
+            double cx = 0, cz = 0;
+            int n = 0;
+            for (int j = 0; j < HN; j++)
+                for (int i = 0; i < HN; i++)
+                    if (gHeights[(size_t)j * HN + i] > sea) {
+                        cx += -TER_HALF + i * cell;
+                        cz += -TER_HALF + j * cell;
+                        n++;
+                    }
+            if (n > 32) {
+                cx /= n; cz /= n;
+                // radial contour: the outermost land along each bearing.
+                // The skirt is a ring plus a centre fan, so it wants a
+                // star-shaped outline anyway -- deep bays get bridged.
+                const int P = SDL_clamp(GRID_N, 96, 512);
+                std::vector<float> rad((size_t)P, 0.0f);
+                const float step = cell * 0.75f;
+                const float rmax = TER_HALF * 2.2f;
+                for (int p = 0; p < P; p++) {
+                    float a = 6.2831853f * p / P;
+                    float dx = cosf(a), dz = sinf(a);
+                    float found = 0.0f;
+                    for (float r = 0.0f; r < rmax; r += step) {
+                        float x = (float)cx + dx * r, z = (float)cz + dz * r;
+                        if (fabsf(x) > TER_HALF || fabsf(z) > TER_HALF)
+                            break;
+                        if (height_at(x, z) > sea)
+                            found = r;
+                    }
+                    rad[p] = found;
+                }
+                // smooth around the ring so the silhouette is not jagged
+                for (int pass = 0; pass < 2; pass++) {
+                    std::vector<float> t = rad;
+                    for (int p = 0; p < P; p++)
+                        rad[p] = (t[(p + P - 1) % P] + 2.0f * t[p] +
+                                  t[(p + 1) % P]) * 0.25f;
+                }
+                for (int p = 0; p < P; p++) {
+                    float a = 6.2831853f * p / P;
+                    float r = rad[p] + cell * 1.5f;   // meet the shore
+                    ring.insert(ring.end(), {
+                        SDL_clamp((float)cx + cosf(a) * r, -TER_HALF, TER_HALF),
+                        SDL_clamp((float)cz + sinf(a) * r, -TER_HALF, TER_HALF) });
+                }
+                skirtCenter[0] = (float)cx;
+                skirtCenter[1] = (float)cz;
+                trimmed = true;
+            }
+        }
+        if (!trimmed) {
+            for (int i = 0; i < GRID_N; i++)
+                ring.insert(ring.end(),
+                    { -TER_HALF + 2.0f * TER_HALF * i / GRID_N, -TER_HALF });
+            for (int j = 0; j < GRID_N; j++)
+                ring.insert(ring.end(),
+                    { TER_HALF, -TER_HALF + 2.0f * TER_HALF * j / GRID_N });
+            for (int i = GRID_N; i > 0; i--)
+                ring.insert(ring.end(),
+                    { -TER_HALF + 2.0f * TER_HALF * i / GRID_N, TER_HALF });
+            for (int j = GRID_N; j > 0; j--)
+                ring.insert(ring.end(),
+                    { -TER_HALF, -TER_HALF + 2.0f * TER_HALF * j / GRID_N });
+        }
         int P = (int)ring.size() / 2;
         std::vector<float> sv;          // x, z, t
         for (int p = 0; p < P; p++) {
@@ -3120,7 +3192,7 @@ int main(int argc, char** argv)
             sv.insert(sv.end(), { ring[p * 2], ring[p * 2 + 1], 1.0f });
         }
         int centerIdx = P * 2;
-        sv.insert(sv.end(), { 0.0f, 0.0f, 2.0f });
+        sv.insert(sv.end(), { skirtCenter[0], skirtCenter[1], 2.0f });
         std::vector<unsigned> si;
         for (int p = 0; p < P; p++) {
             unsigned a = p * 2, b = a + 1;
@@ -3231,6 +3303,7 @@ int main(int argc, char** argv)
         gTune.genPlateau = gGen.plateau; gTune.genTerr = gGen.terr;
         gTune.genBeach = gGen.beach;    gTune.genDrop = gGen.drop;
         gTune.autoGrow = autoGrow ? 1 : 0;
+        gTune.trimSkirt = trimSkirt ? 1 : 0;
         memset(gTune.propSelId, 0, sizeof gTune.propSelId);
         if (propSel >= 0 && propSel < (int)gPropMeshes.size())
             SDL_strlcpy(gTune.propSelId,
@@ -3293,6 +3366,7 @@ int main(int argc, char** argv)
             gGen.plateau = gTune.genPlateau; gGen.terr = gTune.genTerr;
             gGen.beach = gTune.genBeach;    gGen.drop = gTune.genDrop;
             autoGrow = gTune.autoGrow != 0;
+            trimSkirt = gTune.trimSkirt != 0;
             if (gTune.propSelId[0]) {
                 for (int mi = 0; mi < (int)gPropMeshes.size(); mi++)
                     if (mesh_id(gPropMeshes[mi]) == gTune.propSelId) {
@@ -3592,12 +3666,18 @@ int main(int argc, char** argv)
                 selInst = -1;
         }
 
+        const bool heightsChanged = gHeightsDirty;
         upload_dirty();
 
         // live ground-AO pass: blades top-down into the AO map
         {
             build_topdown();   // the map may have grown since last frame
-            if (skirtHalf != TER_HALF || skirtGrid != GRID_N)
+            // the trimmed outline follows the terrain, so rebuild it when
+            // the map changes shape -- but not mid-stroke, which would
+            // retrace the coastline every frame
+            if (skirtHalf != TER_HALF || skirtGrid != GRID_N ||
+                skirtWasTrimmed != trimSkirt ||
+                (trimSkirt && heightsChanged && !wasPainting))
                 build_skirt();
             glBindFramebuffer(GL_FRAMEBUFFER, aoFbo);
             glViewport(0, 0, AO_N, AO_N);
@@ -3818,6 +3898,8 @@ int main(int argc, char** argv)
                         islandFrill);
             glUniform1f(glGetUniformLocation(skirtProg, "uBulge"),
                         islandBulge);
+            glUniform2f(glGetUniformLocation(skirtProg, "uCenter"),
+                        skirtCenter[0], skirtCenter[1]);
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, gHeightTex);
             glUniform1i(glGetUniformLocation(skirtProg, "uHeight"), 0);
@@ -4048,6 +4130,15 @@ int main(int argc, char** argv)
                                        0.0f, 1.0f, "%.2f");
                     ImGui::SliderFloat("Island Bulge", &islandBulge,
                                        0.0f, 1.0f, "%.2f");
+                    ImGui::Checkbox("Trim Underside", &trimSkirt);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip(
+                            "Hangs the underside off the island's own "
+                            "coastline instead of the whole map square, so "
+                            "below the water it is the same shape as above "
+                            "it.\nTraces the shore wherever the land meets "
+                            "the waterline; deep bays get bridged, since the "
+                            "underside is a single solid mass.");
                     ImGui::SeparatorText("Shoreline");
                     bool shoreDirty = false;
                     if (ImGui::Checkbox("Shoreline", &gShore.on)) {
