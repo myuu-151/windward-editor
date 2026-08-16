@@ -45,6 +45,12 @@ static int   MASK_N   = 512;         // splat mask resolution
 static int   GRASS_N  = 320;         // grass instances per side
 
 // resolution tiers picked from the map's world size
+// Extra resolution on top of what the world size asks for. The grid is
+// uniform, so this cannot be spent only where it is needed -- there is no
+// refining one hillside -- but a road cut across a cliff is exactly where
+// too few cells shows, and this is the lever that fixes it.
+static float gDetailMult = 1.0f;
+
 static void resolutions_for(float half, int* grid, int* hn, int* mask,
                             int* grass)
 {
@@ -58,10 +64,11 @@ static void resolutions_for(float half, int* grid, int* hn, int* mask,
         int n = (int)(v / step + 0.5f) * step;
         return SDL_clamp(n, lo, hi);
     };
-    *grid  = snap(256.0f * mult, 64, 256, 1024);
+    const float dm = SDL_clamp(gDetailMult, 0.5f, 4.0f);
+    *grid  = snap(256.0f * mult * dm, 64, 128, 2048);
     *hn    = *grid + 1;
-    *mask  = snap(512.0f * mult, 128, 512, 2048);
-    *grass = snap(320.0f * mult, 32, 320, 800);
+    *mask  = snap(512.0f * mult * dm, 128, 256, 4096);
+    *grass = snap(320.0f * mult, 32, 320, 800);   // blades stay per-area
 }
 
 // AO map resolution for a world size: the ground-AO pass renders blade
@@ -1255,6 +1262,84 @@ static void grow_canvas(float newHalf, float seaLevel)
     mark_all_dirty();
     SDL_Log("map grew to %.0f units (sculpt untouched): grid %d, heights %d",
             newHalf * 2.0f, GRID_N, HN);
+}
+
+// Rebuild the map at the resolution the current detail setting asks for,
+// keeping its world size, its shape and everything painted on it. Heights
+// and masks are resampled bilinearly, so raising detail interpolates what
+// is there and lowering it averages -- neither invents nor discards work.
+static void apply_detail()
+{
+    int nGrid, nHN, nMask, nGrass;
+    resolutions_for(TER_HALF, &nGrid, &nHN, &nMask, &nGrass);
+    if (nHN == HN && nMask == MASK_N && nGrid == GRID_N)
+        return;
+    push_undo();
+
+    auto rs_f = [](const std::vector<float>& src, int sn, int dn) {
+        std::vector<float> dst((size_t)dn * dn, 0.0f);
+        for (int j = 0; j < dn; j++)
+            for (int i = 0; i < dn; i++) {
+                float u = (float)i / (dn - 1) * (sn - 1);
+                float v = (float)j / (dn - 1) * (sn - 1);
+                int i0 = SDL_clamp((int)u, 0, sn - 2);
+                int j0 = SDL_clamp((int)v, 0, sn - 2);
+                float fu = u - i0, fv = v - j0;
+                float a = src[(size_t)j0 * sn + i0];
+                float b = src[(size_t)j0 * sn + i0 + 1];
+                float c = src[(size_t)(j0 + 1) * sn + i0];
+                float d = src[(size_t)(j0 + 1) * sn + i0 + 1];
+                dst[(size_t)j * dn + i] = (a * (1 - fu) + b * fu) * (1 - fv) +
+                                          (c * (1 - fu) + d * fu) * fv;
+            }
+        return dst;
+    };
+    auto rs_u8 = [](const std::vector<Uint8>& src, int sn, int dn) {
+        std::vector<Uint8> dst((size_t)dn * dn, 0);
+        for (int j = 0; j < dn; j++)
+            for (int i = 0; i < dn; i++) {
+                float u = ((i + 0.5f) / dn) * sn - 0.5f;
+                float v = ((j + 0.5f) / dn) * sn - 0.5f;
+                int i0 = SDL_clamp((int)floorf(u), 0, sn - 1);
+                int j0 = SDL_clamp((int)floorf(v), 0, sn - 1);
+                int i1 = SDL_min(i0 + 1, sn - 1), j1 = SDL_min(j0 + 1, sn - 1);
+                float fu = SDL_clamp(u - i0, 0.0f, 1.0f);
+                float fv = SDL_clamp(v - j0, 0.0f, 1.0f);
+                float a = src[(size_t)j0 * sn + i0], b = src[(size_t)j0 * sn + i1];
+                float c = src[(size_t)j1 * sn + i0], d = src[(size_t)j1 * sn + i1];
+                float m = (a * (1 - fu) + b * fu) * (1 - fv) +
+                          (c * (1 - fu) + d * fu) * fv;
+                dst[(size_t)j * dn + i] = (Uint8)SDL_clamp(m + 0.5f, 0.0f, 255.0f);
+            }
+        return dst;
+    };
+
+    std::vector<float> nh = rs_f(gHeights, HN, nHN);
+    gHeights.swap(nh);
+    if (gShoreBase.size() == (size_t)HN * HN) {
+        std::vector<float> t = rs_f(gShoreBase, HN, nHN);
+        gShoreBase.swap(t);
+    }
+    if (gGenBase.size() == (size_t)HN * HN) {
+        std::vector<float> t = rs_f(gGenBase, HN, nHN);
+        gGenBase.swap(t);
+    }
+    std::vector<Uint8> m1 = rs_u8(gMask, MASK_N, nMask);
+    std::vector<Uint8> m2 = rs_u8(gMask2, MASK_N, nMask);
+    std::vector<Uint8> mk = rs_u8(gKill, MASK_N, nMask);
+    if (gGenMask.size() == (size_t)MASK_N * MASK_N) {
+        std::vector<Uint8> g1 = rs_u8(gGenMask, MASK_N, nMask);
+        std::vector<Uint8> g2 = rs_u8(gGenMask2, MASK_N, nMask);
+        std::vector<Uint8> g3 = rs_u8(gGenKill, MASK_N, nMask);
+        gGenMask.swap(g1); gGenMask2.swap(g2); gGenKill.swap(g3);
+    }
+    gMask.swap(m1); gMask2.swap(m2); gKill.swap(mk);
+
+    HN = nHN; MASK_N = nMask; GRID_N = nGrid; GRASS_N = nGrass;
+    gMapResized = true;
+    mark_all_dirty();
+    SDL_Log("detail x%.2f: grid %d, heights %d, masks %d",
+            gDetailMult, GRID_N, HN, MASK_N);
 }
 
 // is there land near the map boundary that wants somewhere to go?
@@ -3096,6 +3181,7 @@ struct TuneBlob {
     float genDrop = GenParams().drop;
     int   autoGrow = 1;
     int   trimSkirt = 0;
+    float detailMult = 1.0f;
     int   genFlats = GenParams().flats;
     int   genPaths = GenParams().paths ? 1 : 0;
     int   genPathPaint = GenParams().pathPaint ? 1 : 0;
@@ -4077,6 +4163,7 @@ int main(int argc, char** argv)
         gTune.genBeach = gGen.beach;    gTune.genDrop = gGen.drop;
         gTune.autoGrow = autoGrow ? 1 : 0;
         gTune.trimSkirt = trimSkirt ? 1 : 0;
+        gTune.detailMult = gDetailMult;
         gTune.genFlats = gGen.flats;
         gTune.genPaths = gGen.paths ? 1 : 0;
         gTune.genPathPaint = gGen.pathPaint ? 1 : 0;
@@ -4154,6 +4241,7 @@ int main(int argc, char** argv)
             gGenBase.clear();
             autoGrow = gTune.autoGrow != 0;
             trimSkirt = gTune.trimSkirt != 0;
+            gDetailMult = SDL_clamp(gTune.detailMult, 0.5f, 4.0f);
             if (gTune.propSelId[0]) {
                 for (int mi = 0; mi < (int)gPropMeshes.size(); mi++)
                     if (mesh_id(gPropMeshes[mi]) == gTune.propSelId) {
@@ -5734,6 +5822,28 @@ int main(int argc, char** argv)
                     ImGui::Checkbox("Shadows", &shadowsOn);
                     ImGui::SliderFloat("Sun Shadow Intensity",
                                        &shadowStrength, 0.0f, 1.0f, "%.2f");
+                    ImGui::SeparatorText("Detail");
+                    {
+                        float dm = gDetailMult;
+                        ImGui::SliderFloat("Terrain Detail", &dm, 0.5f, 4.0f,
+                                           "x%.2f");
+                        if (ImGui::IsItemDeactivatedAfterEdit() &&
+                            fabsf(dm - gDetailMult) > 0.001f) {
+                            gDetailMult = dm;
+                            apply_detail();
+                            refresh_if_resized();
+                        }
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip(
+                                "More cells for the same world, so cuts and "
+                                "edges come out sharper.\nThe grid is "
+                                "uniform, so this cannot be spent only where "
+                                "it is needed -- it raises detail "
+                                "everywhere, and costs memory and frame "
+                                "time to match.");
+                        ImGui::TextDisabled("grid %d, heights %d, masks %d",
+                                            GRID_N, HN, MASK_N);
+                    }
                     ImGui::SeparatorText("Map Size");
                     {
                         static const char* kSizes[] = { "48 (small)",
