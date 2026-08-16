@@ -3887,8 +3887,13 @@ int main(int argc, char** argv)
         int seed = gGen.seed;
         gGen = keep;
         gGen.seed = genSeedGiven ? keep.seed : seed;
-        if (genHalfArg > 4.0f && fabsf(genHalfArg - TER_HALF) > 0.01f)
+        if (genHalfArg > 4.0f && fabsf(genHalfArg - TER_HALF) > 0.01f) {
+            // resize_map scales the waterline with the world; here that
+            // would quietly move sea level and change what the seed makes
+            float keepWater = gWaterline;
             resize_map(genHalfArg);
+            gWaterline = keepWater;
+        }
         new_map();                 // clear the loaded island, keep its size
         gGenBase = gHeights;
         gGenMask = gMask; gGenMask2 = gMask2; gGenKill = gKill;
@@ -4774,6 +4779,27 @@ int main(int argc, char** argv)
                         ImGui::SameLine();
                         if (ImGui::Button("Prev")) { gGen.seed--; genDirty = true; }
 
+                        ImGui::SeparatorText("Map");
+                        {
+                            float mapSize = TER_HALF * 2.0f;
+                            ImGui::SetNextItemWidth(-90.0f * uiScale);
+                            ImGui::SliderFloat("Map Size", &mapSize, 24.0f,
+                                               400.0f, "%.0f units");
+                            if (ImGui::IsItemDeactivatedAfterEdit() &&
+                                fabsf(mapSize * 0.5f - TER_HALF) > 0.05f) {
+                                float keepWater = gWaterline;
+                                apply_map_resize(mapSize * 0.5f);
+                                gWaterline = keepWater;
+                                genDirty = true;
+                            }
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip(
+                                    "Height and Terrace Step are absolute "
+                                    "world units, so the SAME seed makes a "
+                                    "different island on a different sized "
+                                    "map.\nMatch this to the map you tuned "
+                                    "the sliders on.");
+                        }
                         ImGui::SeparatorText("Footprint");
                         genDirty |= ImGui::SliderFloat("Island Size",
                                                        &gGen.size, 0.15f, 1.1f,
