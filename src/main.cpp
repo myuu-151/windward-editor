@@ -6275,8 +6275,39 @@ int main(int argc, char** argv)
                                                kMapFilters, 1, nullptr,
                                                false);
                     ImGui::SameLine();
-                    if (ImGui::Button("Clear Cell"))
-                        gWorldCells[gWorldSel[1]][gWorldSel[0]].clear();
+                    if (ImGui::Button("Clear Cell")) {
+                        // the island on screen, the file behind it and the
+                        // chart's reference to it -- dropping the reference
+                        // alone left the map open and the .wmap on disk
+                        std::string& slot =
+                            gWorldCells[gWorldSel[1]][gWorldSel[0]];
+                        if (!slot.empty()) {
+                            std::error_code ec2;
+                            std::filesystem::remove(slot, ec2);
+                            slot.clear();
+                        }
+                        new_map();
+                        gGen.on = false;
+                        gGenBase.clear();
+                        gGenMask.clear(); gGenMask2.clear(); gGenKill.clear();
+                        gGenProps.clear();
+                        save_world(editor_chart_path().c_str());
+                        rebuild_terrain_mesh();
+                        rebuild_grass_instances();
+                        glBindBuffer(GL_ARRAY_BUFFER, instVbo);
+                        glBufferData(GL_ARRAY_BUFFER,
+                                     inst.size() * sizeof(float),
+                                     inst.data(), GL_STATIC_DRAW);
+                        glBindBuffer(GL_ARRAY_BUFFER, 0);
+                        SDL_Log("cleared %c%d", 'A' + gWorldSel[0],
+                                gWorldSel[1] + 1);
+                    }
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Empties the quadrant: the island, "
+                                          "its file and its place on the "
+                                          "chart.
+This deletes the .wmap on "
+                                          "disk.");
                     ImGui::SeparatorText("Send to Game");
                     if (ImGui::Button("Install Chart to Game")) {
                         namespace fs = std::filesystem;
@@ -6321,37 +6352,6 @@ int main(int argc, char** argv)
                         }
                     }
                     ImGui::TextDisabled("writes the chart next to zelda.exe");
-                    if (ImGui::Button("Clear Cell")) {
-                        // wipe the quadrant: the island on screen, the file
-                        // behind it, and the chart's reference to it
-                        std::string& slot = gWorldCells[gWorldSel[1]][gWorldSel[0]];
-                        if (!slot.empty()) {
-                            std::error_code ec2;
-                            std::filesystem::remove(slot, ec2);
-                            slot.clear();
-                        }
-                        new_map();
-                        gGen.on = false;
-                        gGenBase.clear();
-                        gGenMask.clear(); gGenMask2.clear(); gGenKill.clear();
-                        gGenProps.clear();
-                        save_world(editor_chart_path().c_str());
-                        rebuild_terrain_mesh();
-                        rebuild_grass_instances();
-                        glBindBuffer(GL_ARRAY_BUFFER, instVbo);
-                        glBufferData(GL_ARRAY_BUFFER,
-                                     inst.size() * sizeof(float),
-                                     inst.data(), GL_STATIC_DRAW);
-                        glBindBuffer(GL_ARRAY_BUFFER, 0);
-                        SDL_Log("cleared %c%d", 'A' + gWorldSel[0],
-                                gWorldSel[1] + 1);
-                    }
-                    if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("Empties the selected quadrant: the "
-                                          "island, its file and its place on "
-                                          "the chart.\nThis deletes the .wmap "
-                                          "on disk.");
-                    ImGui::SameLine();
                     if (ImGui::Button("Save Island to Cell")) {
                         // explicit version of what switching quadrants
                         // does, for when you are staying put
