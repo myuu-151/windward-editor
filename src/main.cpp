@@ -1494,29 +1494,29 @@ struct GenParams {
     float ridge = 0.30f;      // billowy blobs .. sharp mountain spines
     int   peaks = 2;         // seeded summits on top of the noise
     float peakH = 1.17f;
-    float peakSpread = 0.5f; // how far the summits sit from the centre
+    float peakSpread = 0.48f; // how far the summits sit from the centre
     float plateau = 0.46f;   // soft ceiling: mesa tops
     float terr = 3.2f;       // terrace step height, 0 = off
-    float beach = 0.58f;     // widens the gentle land near the water
+    float beach = 0.59f;     // widens the gentle land near the water
     float drop = 12.0f;       // sea floor depth outside the island
     // ---- level layout: the parts that make an island playable rather
     // ---- than just scenery
     int   flats = 2;         // flat clearings to build on
-    float flatSize = 0.20f;  // clearing radius, fraction of island radius
-    float flatFlat = 1.0f;   // how completely a clearing is levelled
+    float flatSize = 0.17f;  // clearing radius, fraction of island radius
+    float flatFlat = 0.12f;   // how completely a clearing is levelled
     bool  paths = true;      // trails linking the clearings and the shore
-    float pathWidth = 1.9f;  // world units
-    float pathWander = 0.77f;
-    float pathCut = 0.76f;   // how firmly a trail levels the ground it crosses
+    float pathWidth = 1.8f;  // world units
+    float pathWander = 0.0f;
+    float pathCut = 0.38f;   // how firmly a trail levels the ground it crosses
     float pathGrade = 0.56f; // steepest climb a trail will accept
     float pathBank = 3.0f;   // slope of the cut/fill banks beside the tread
     float pathCling = 0.28f;  // 0 = cut across the terrain, 1 = wind around it
     bool  pathPaint = true;  // lay dirt (and clear grass) along the trails
     int   pathLayer = 1;     // 0 = path dirt (brown), 1 = soft dirt (sand)
     bool  spiralRoad = true; // a road wrapping the terraces to the summit
-    float spiralTurn = 0.26f; // turns of the hill gained per terrace
-    float spiralInset = 0.0f;// how far back from each drop the road sits
-    float spiralHug = 0.5f;  // 0 = cut straight through risers, 1 = follow
+    float spiralTurn = 0.18f; // turns of the hill gained per terrace
+    float spiralInset = 1.26f;// how far back from each drop the road sits
+    float spiralHug = 0.06f;  // 0 = cut straight through risers, 1 = follow
                              // the terrace treads exactly
     float pathFollow = 0.0f;    // 0 = hold one graded line, 1 = drape over
                                 // the ground as it is
