@@ -33,12 +33,29 @@
 #include <unordered_map>
 #include <vector>
 
-// world extent: the ground is 2*TER_HALF on a side
-static const float TER_HALF = 24.0f;
-static const int   GRID_N   = 256;   // terrain quads per side
-static const int   HN       = 257;   // height samples per side
-static const int   MASK_N   = 512;   // splat mask resolution
-static const int   GRASS_N  = 320;   // grass instances per side
+// World extent and resolutions. These scale together: a bigger island
+// gets proportionally more height samples, mask texels, mesh quads and
+// grass, so sculpting and painting keep the same detail per world unit
+// at any size.
+static float TER_HALF = 24.0f;       // the ground is 2*TER_HALF on a side
+static int   GRID_N   = 256;         // terrain quads per side
+static int   HN       = 257;         // height samples per side
+static int   MASK_N   = 512;         // splat mask resolution
+static int   GRASS_N  = 320;         // grass instances per side
+
+// resolution tiers picked from the map's world size
+static void resolutions_for(float half, int* grid, int* hn, int* mask,
+                            int* grass)
+{
+    const float mult = half / 24.0f;        // 1 at the original 48u map
+    int step = mult <= 1.01f ? 0 : mult <= 2.01f ? 1 : 2;
+    const int gridT[3]  = { 256, 384, 512 };
+    const int hnT[3]    = { 257, 385, 513 };
+    const int maskT[3]  = { 512, 768, 1024 };
+    const int grassT[3] = { 320, 460, 610 };
+    *grid = gridT[step]; *hn = hnT[step];
+    *mask = maskT[step]; *grass = grassT[step];
+}
 
 // ---------------------------------------------------------------- shaders
 
@@ -880,6 +897,7 @@ struct PropInst {
     float x, y, z, yaw, scale;
 };
 static std::vector<PropInst> gProps;
+static float gWaterline = -3.0f;   // sea level, world units
 
 static float height_at(float x, float z)
 {
@@ -967,6 +985,80 @@ struct Snapshot {
 };
 static std::vector<Snapshot> gUndoStack, gRedoStack;
 
+static std::vector<float> gShoreBase;   // heights before any shoreline
+static void mark_all_dirty();
+static bool gMapResized = false;   // a load changed the world size
+
+// Resize the world: resample every layer into the new resolution so the
+// island scales with the map instead of being lost. Called from the Map
+// tab and when a map with a different size is loaded.
+static void resize_map(float newHalf)
+{
+    int nGrid, nHN, nMask, nGrass;
+    resolutions_for(newHalf, &nGrid, &nHN, &nMask, &nGrass);
+
+    auto resample_f = [](const std::vector<float>& src, int sn, int dn) {
+        std::vector<float> dst((size_t)dn * dn, 0.0f);
+        for (int j = 0; j < dn; j++)
+            for (int i = 0; i < dn; i++) {
+                float u = (float)i / (dn - 1) * (sn - 1);
+                float v = (float)j / (dn - 1) * (sn - 1);
+                int i0 = SDL_clamp((int)u, 0, sn - 2);
+                int j0 = SDL_clamp((int)v, 0, sn - 2);
+                float fu = u - i0, fv = v - j0;
+                float a = src[(size_t)j0 * sn + i0];
+                float b = src[(size_t)j0 * sn + i0 + 1];
+                float c = src[(size_t)(j0 + 1) * sn + i0];
+                float d = src[(size_t)(j0 + 1) * sn + i0 + 1];
+                dst[(size_t)j * dn + i] =
+                    (a * (1 - fu) + b * fu) * (1 - fv) +
+                    (c * (1 - fu) + d * fu) * fv;
+            }
+        return dst;
+    };
+    auto resample_u8 = [](const std::vector<Uint8>& src, int sn, int dn) {
+        std::vector<Uint8> dst((size_t)dn * dn, 0);
+        for (int j = 0; j < dn; j++)
+            for (int i = 0; i < dn; i++) {
+                int si = SDL_clamp(i * sn / dn, 0, sn - 1);
+                int sj = SDL_clamp(j * sn / dn, 0, sn - 1);
+                dst[(size_t)j * dn + i] = src[(size_t)sj * sn + si];
+            }
+        return dst;
+    };
+
+    // heights carry their world scale: a map twice as wide wants hills
+    // twice as tall to keep the same slopes
+    const float hscale = newHalf / TER_HALF;
+    std::vector<float> nh = resample_f(gHeights, HN, nHN);
+    for (float& v : nh) v *= hscale;
+    gHeights.swap(nh);
+    if (!gShoreBase.empty()) {
+        std::vector<float> nb = resample_f(gShoreBase, HN, nHN);
+        for (float& v : nb) v *= hscale;
+        gShoreBase.swap(nb);
+    }
+    std::vector<Uint8> m1 = resample_u8(gMask, MASK_N, nMask);
+    std::vector<Uint8> m2 = resample_u8(gMask2, MASK_N, nMask);
+    std::vector<Uint8> mk = resample_u8(gKill, MASK_N, nMask);
+    gMask.swap(m1); gMask2.swap(m2); gKill.swap(mk);
+
+    // props sit in world units, so they move out with the island
+    for (PropInst& pi : gProps) {
+        pi.x *= hscale; pi.y *= hscale; pi.z *= hscale;
+        pi.scale *= hscale;
+    }
+    gWaterline *= hscale;
+
+    TER_HALF = newHalf;
+    HN = nHN; MASK_N = nMask; GRID_N = nGrid; GRASS_N = nGrass;
+    gUndoStack.clear();
+    gRedoStack.clear();
+    mark_all_dirty();
+    SDL_Log("map resized to %.0f units: grid %d, heights %d, masks %d",
+            newHalf * 2.0f, GRID_N, HN, MASK_N);
+}
+
 static void mark_all_dirty()
 {
     gHeightsDirty = gMaskDirty = gMask2Dirty = gKillDirty = true;
@@ -1018,7 +1110,6 @@ struct ShoreParams {
     bool  on = false;
 };
 static ShoreParams gShore;
-static std::vector<float> gShoreBase;   // heights before any shoreline
 
 static void apply_shoreline(float seaLevel)
 {
@@ -1880,8 +1971,13 @@ static void save_map(const char* path)
         SDL_Log("save failed: %s", path);
         return;
     }
-    const char magic[8] = { 'T','E','R','M','A','P','0','7' };
+    const char magic[8] = { 'T','E','R','M','A','P','0','8' };
     fwrite(magic, 1, 8, f);
+    // world size and the resolutions that scale with it, so a map opens
+    // at the size it was authored
+    { float h = TER_HALF; Uint32 r[3] = { (Uint32)HN, (Uint32)MASK_N,
+                                          (Uint32)GRID_N };
+      fwrite(&h, 4, 1, f); fwrite(r, 4, 3, f); }
     fwrite(gHeights.data(), sizeof(float), gHeights.size(), f);
     fwrite(gMask.data(), 1, gMask.size(), f);
     fwrite(gKill.data(), 1, gKill.size(), f);
@@ -1920,6 +2016,19 @@ static bool load_map(const char* path)
         fclose(f);
         return false;
     }
+    if (magic[7] >= '8') {
+        float h = 24.0f; Uint32 r[3] = { 257, 512, 256 };
+        fread(&h, 4, 1, f); fread(r, 4, 3, f);
+        TER_HALF = h; HN = (int)r[0]; MASK_N = (int)r[1]; GRID_N = (int)r[2];
+        int g, hn, mk, gr;
+        resolutions_for(TER_HALF, &g, &hn, &mk, &gr);
+        GRASS_N = gr;
+        gMapResized = true;      // the caller refreshes size-bound buffers
+    }
+    gHeights.assign((size_t)HN * HN, 0.0f);
+    gMask.assign((size_t)MASK_N * MASK_N, 0);
+    gMask2.assign((size_t)MASK_N * MASK_N, 0);
+    gKill.assign((size_t)MASK_N * MASK_N, 255);
     fread(gHeights.data(), sizeof(float), gHeights.size(), f);
     fread(gMask.data(), 1, gMask.size(), f);
     if (magic[7] >= '2')
@@ -1997,7 +2106,6 @@ static const int WORLD_MAX = 8;
 static int gWorldSize = 7;               // Wind Waker's chart is 7x7
 static std::string gWorldCells[WORLD_MAX][WORLD_MAX];
 static int gWorldSel[2] = { 0, 0 };
-static float gWaterline = -3.0f;         // sea level in world units
 static bool gShowWater = true;
 
 static void save_world(const char* path)
@@ -2239,38 +2347,47 @@ int main(int argc, char** argv)
         scan_props(std::string(assetsDir) + "props");
     }
 
-    // terrain grid (static xz, heights come from the texture)
-    std::vector<float> verts;
-    verts.reserve((GRID_N + 1) * (GRID_N + 1) * 2);
-    for (int j = 0; j <= GRID_N; j++)
-        for (int i = 0; i <= GRID_N; i++) {
-            verts.push_back(-TER_HALF + 2.0f * TER_HALF * i / GRID_N);
-            verts.push_back(-TER_HALF + 2.0f * TER_HALF * j / GRID_N);
-        }
-    std::vector<unsigned> idx;
-    idx.reserve(GRID_N * GRID_N * 6);
-    for (int j = 0; j < GRID_N; j++)
-        for (int i = 0; i < GRID_N; i++) {
-            unsigned a = j * (GRID_N + 1) + i;
-            unsigned b = a + 1;
-            unsigned c = a + (GRID_N + 1);
-            unsigned d = c + 1;
-            idx.insert(idx.end(), { a, c, b, b, c, d });
-        }
+    // Terrain mesh, rebuilt whenever the map is resized so the quad
+    // count tracks the world size and detail per unit stays put.
+    GLsizei terIdxCount = 0;
     GLuint terVao = 0, terVbo = 0, terIbo = 0;
-    glGenVertexArrays(1, &terVao);
-    glGenBuffers(1, &terVbo);
-    glGenBuffers(1, &terIbo);
-    glBindVertexArray(terVao);
-    glBindBuffer(GL_ARRAY_BUFFER, terVbo);
-    glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(),
-                 GL_STATIC_DRAW);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, terIbo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, idx.size() * sizeof(unsigned),
-                 idx.data(), GL_STATIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
-    glBindVertexArray(0);
+    auto rebuild_terrain_mesh = [&]() {
+    // terrain grid (static xz, heights come from the texture)
+        std::vector<float> verts;
+        verts.reserve((GRID_N + 1) * (GRID_N + 1) * 2);
+        for (int j = 0; j <= GRID_N; j++)
+            for (int i = 0; i <= GRID_N; i++) {
+                verts.push_back(-TER_HALF + 2.0f * TER_HALF * i / GRID_N);
+                verts.push_back(-TER_HALF + 2.0f * TER_HALF * j / GRID_N);
+            }
+        std::vector<unsigned> idx;
+        idx.reserve(GRID_N * GRID_N * 6);
+        for (int j = 0; j < GRID_N; j++)
+            for (int i = 0; i < GRID_N; i++) {
+                unsigned a = j * (GRID_N + 1) + i;
+                unsigned b = a + 1;
+                unsigned c = a + (GRID_N + 1);
+                unsigned d = c + 1;
+                idx.insert(idx.end(), { a, c, b, b, c, d });
+            }
+        if (terVao) { glDeleteVertexArrays(1, &terVao); glDeleteBuffers(1, &terVbo); glDeleteBuffers(1, &terIbo); }
+        glGenVertexArrays(1, &terVao);
+        glGenBuffers(1, &terVbo);
+        glGenBuffers(1, &terIbo);
+        glBindVertexArray(terVao);
+        glBindBuffer(GL_ARRAY_BUFFER, terVbo);
+        glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(),
+                     GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, terIbo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, idx.size() * sizeof(unsigned),
+                     idx.data(), GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+        glBindVertexArray(0);
+
+        terIdxCount = (GLsizei)idx.size();
+    };
+    rebuild_terrain_mesh();
 
     // height + mask textures
     glGenTextures(1, &gHeightTex);
@@ -2306,24 +2423,31 @@ int main(int argc, char** argv)
         { -1, 0, 1 }, { 1, 0, 1 }, { -1, 1, 1 },
         { 1, 0, 1 }, { 1, 1, 1 }, { -1, 1, 1 },
     };
-    // instances: jittered grid, deterministic
+    // grass instances: rebuilt on resize so density per unit holds
     std::vector<float> inst;
-    inst.reserve(GRASS_N * GRASS_N * 4);
-    unsigned rng = 12345u;
-    auto frand = [&rng]() {
-        rng = rng * 1664525u + 1013904223u;
-        return (rng >> 8) * (1.0f / 16777216.0f);
+    int instCount = 0;
+    auto rebuild_grass_instances = [&]() {
+        inst.clear();
+    // instances: jittered grid, deterministic
+        inst.reserve(GRASS_N * GRASS_N * 4);
+        unsigned rng = 12345u;
+        auto frand = [&rng]() {
+            rng = rng * 1664525u + 1013904223u;
+            return (rng >> 8) * (1.0f / 16777216.0f);
+        };
+        for (int j = 0; j < GRASS_N; j++)
+            for (int i = 0; i < GRASS_N; i++) {
+                float x = -TER_HALF + 2.0f * TER_HALF * (i + frand()) / GRASS_N;
+                float z = -TER_HALF + 2.0f * TER_HALF * (j + frand()) / GRASS_N;
+                inst.push_back(x);
+                inst.push_back(z);
+                inst.push_back(frand() * 6.2831853f);
+                inst.push_back(frand());
+            }
+
+        instCount = GRASS_N * GRASS_N;
     };
-    for (int j = 0; j < GRASS_N; j++)
-        for (int i = 0; i < GRASS_N; i++) {
-            float x = -TER_HALF + 2.0f * TER_HALF * (i + frand()) / GRASS_N;
-            float z = -TER_HALF + 2.0f * TER_HALF * (j + frand()) / GRASS_N;
-            inst.push_back(x);
-            inst.push_back(z);
-            inst.push_back(frand() * 6.2831853f);
-            inst.push_back(frand());
-        }
-    int instCount = GRASS_N * GRASS_N;
+    rebuild_grass_instances();
 
     GLuint grassVao = 0, bladeVbo = 0, instVbo = 0;
     glGenVertexArrays(1, &grassVao);
@@ -2341,6 +2465,20 @@ int main(int argc, char** argv)
     glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 4 * sizeof(float), nullptr);
     glVertexAttribDivisor(1, 1);
     glBindVertexArray(0);
+
+    // Resize the world and refresh every buffer that depends on its
+    // size: the mesh, the grass field, and the shader-placed rings.
+    auto apply_map_resize = [&](float newHalf) {
+        resize_map(newHalf);
+        rebuild_terrain_mesh();
+        rebuild_grass_instances();
+        glBindBuffer(GL_ARRAY_BUFFER, instVbo);
+        glBufferData(GL_ARRAY_BUFFER, inst.size() * sizeof(float),
+                     inst.data(), GL_STATIC_DRAW);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        gShoreBase.clear();
+        gShore.on = false;
+    };
 
     GLuint emptyVao = 0;
     glGenVertexArrays(1, &emptyVao);
@@ -2943,7 +3081,7 @@ int main(int argc, char** argv)
             glBindTexture(GL_TEXTURE_2D, gHeightTex);
             glUniform1i(glGetUniformLocation(depthTerProg, "uHeight"), 0);
             glBindVertexArray(terVao);
-            glDrawElements(GL_TRIANGLES, (GLsizei)idx.size(), GL_UNSIGNED_INT,
+            glDrawElements(GL_TRIANGLES, terIdxCount, GL_UNSIGNED_INT,
                            nullptr);
             if (!gProps.empty()) {
                 glUseProgram(depthPropProg);
@@ -3038,7 +3176,7 @@ int main(int argc, char** argv)
         glUniform1i(glGetUniformLocation(terProg, "uShadowsOn"),
                     shadowsOn ? 1 : 0);
         glBindVertexArray(terVao);
-        glDrawElements(GL_TRIANGLES, (GLsizei)idx.size(), GL_UNSIGNED_INT, nullptr);
+        glDrawElements(GL_TRIANGLES, terIdxCount, GL_UNSIGNED_INT, nullptr);
 
         // generated land beyond the map bounds
         if (extendOn) {
@@ -3679,6 +3817,38 @@ int main(int argc, char** argv)
                     ImGui::SameLine();
                     if (ImGui::Button("Clear Cell"))
                         gWorldCells[gWorldSel[1]][gWorldSel[0]].clear();
+                    ImGui::SeparatorText("Send to Game");
+                    if (ImGui::Button("Install Chart to Game")) {
+                        namespace fs = std::filesystem;
+                        std::error_code ec;
+                        // walk up from the editor to the repo, then into
+                        // the client's exe folder -- that is where it
+                        // looks for a chart
+                        fs::path d = SDL_GetBasePath();
+                        std::string dest;
+                        for (int up = 0; up < 8; up++) {
+                            fs::path cand = d / "SDL3" / "build" / "Release";
+                            if (fs::exists(cand / "zelda.exe", ec)) {
+                                dest = cand.string();
+                                break;
+                            }
+                            if (d.parent_path() == d) break;
+                            d = d.parent_path();
+                        }
+                        if (dest.empty()) {
+                            SDL_Log("install: could not find zelda.exe");
+                        } else {
+                            // one chart only, or the client picks whichever
+                            // it happens to see first
+                            for (const auto& e :
+                                 fs::directory_iterator(dest, ec))
+                                if (e.path().extension() == ".wworld")
+                                    fs::remove(e.path(), ec);
+                            save_world((dest + "/world.wworld").c_str());
+                            SDL_Log("installed chart to %s", dest.c_str());
+                        }
+                    }
+                    ImGui::TextDisabled("writes the chart next to zelda.exe");
                     ImGui::SeparatorText("World File");
                     if (ImGui::Button("Save World..."))
                         SDL_ShowSaveFileDialog(map_dialog_cb, (void*)4, win,
@@ -3700,10 +3870,40 @@ int main(int argc, char** argv)
                     if (ImGui::Button("Load (F9)")) {
                         load_map(mapPath);
                         applySettingsIn();
+                        if (gMapResized) {
+                            gMapResized = false;
+                            rebuild_terrain_mesh();
+                            rebuild_grass_instances();
+                            glBindBuffer(GL_ARRAY_BUFFER, instVbo);
+                            glBufferData(GL_ARRAY_BUFFER,
+                                         inst.size() * sizeof(float),
+                                         inst.data(), GL_STATIC_DRAW);
+                            glBindBuffer(GL_ARRAY_BUFFER, 0);
+                        }
                     }
                     ImGui::Checkbox("Shadows", &shadowsOn);
                     ImGui::SliderFloat("Sun Shadow Intensity",
                                        &shadowStrength, 0.0f, 1.0f, "%.2f");
+                    ImGui::SeparatorText("Map Size");
+                    {
+                        static const char* kSizes[] = { "48 (small)",
+                                                        "96 (medium)",
+                                                        "144 (large)" };
+                        int cur = TER_HALF <= 25.0f ? 0
+                                : TER_HALF <= 49.0f ? 1 : 2;
+                        int pick = cur;
+                        ImGui::SetNextItemWidth(150 * uiScale);
+                        if (ImGui::Combo("World Size", &pick, kSizes, 3) &&
+                            pick != cur) {
+                            const float halves[3] = { 24.0f, 48.0f, 72.0f };
+                            apply_map_resize(halves[pick]);
+                        }
+                        ImGui::TextDisabled("%.0f units across - %d quads, "
+                                            "%d heights", TER_HALF * 2.0f,
+                                            GRID_N, HN);
+                        ImGui::TextDisabled("resampled to keep detail per "
+                                            "unit (clears undo)");
+                    }
                     ImGui::SeparatorText("File");
                     if (ImGui::Button("Export Map..."))
                         SDL_ShowSaveFileDialog(map_dialog_cb, (void*)1, win,
