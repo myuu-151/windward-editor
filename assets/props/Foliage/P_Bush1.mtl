@@ -1,0 +1,4 @@
+newmtl M_BushLeaves
+Kd 0.04009411 0.5647059 0.2249297
+Ka 0 0 0
+map_Kd textures/T_Leaf_Bush.bmp

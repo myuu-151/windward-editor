@@ -1,0 +1,4 @@
+newmtl MV_RockCubic_Cliff
+Kd 0.8910097 1 0.8066038
+Ka 0.8910097 1 0.8066038
+map_Kd textures/T_Snow_BC.bmp

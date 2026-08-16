@@ -1,0 +1,4 @@
+newmtl MV_Grass
+Kd 0.5241386 0.7924528 0.3401566
+Ka 0.3549375 0.6309999 0.2581363
+map_Kd textures/T_FoliageSheet_BC.bmp

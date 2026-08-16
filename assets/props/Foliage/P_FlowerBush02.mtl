@@ -1,0 +1,8 @@
+newmtl M_FlowerBushLeaves
+Kd 0.6480418 0.738 0.12546
+Ka 0 0 0
+map_Kd textures/T_Leaf_Bush.bmp
+newmtl MV_FlowerBushFlowers
+Kd 1 1 1
+Ka 0 0 0
+map_Kd textures/T_FoliageSheet_BC.bmp

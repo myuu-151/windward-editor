@@ -1,0 +1,4 @@
+newmtl MV_CoconutPalmBarkMISC
+Kd 0.7058823 0.4313726 0.1803921
+Ka 0.7058823 0.4313726 0.1803921
+map_Kd textures/T_CoconutPalmMisc_BC.bmp

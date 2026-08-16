@@ -1,0 +1,4 @@
+newmtl MV_GrassDesert
+Kd 0.723 0.615767 0.138093
+Ka 0.7830188 0.5712707 0.4025899
+map_Kd textures/T_FoliageSheet_BC.bmp

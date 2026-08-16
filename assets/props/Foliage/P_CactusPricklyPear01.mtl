@@ -1,0 +1,4 @@
+newmtl M_CactusPricklyPear
+Kd 0 0 0
+Ka 0 0 0
+map_Kd textures/T_Cactus_BC.bmp

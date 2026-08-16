@@ -1,0 +1,8 @@
+newmtl M_ChinaPineBark
+Kd 0.6235294 0.5137254 0.3921569
+Ka 0.6235294 0.5137254 0.3921569
+map_Kd textures/T_ChinaPina_BC.bmp
+newmtl M_ChinaPineLeaves
+Kd 0.1139487 0.404 0.2796923
+Ka 0 0 0
+map_Kd textures/T_Leaf_ChinaPine.bmp

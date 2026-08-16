@@ -1,0 +1,4 @@
+newmtl M_Snow
+Kd 1 1 1
+Ka 1 1 1
+map_Kd textures/T_Snow_BC.bmp

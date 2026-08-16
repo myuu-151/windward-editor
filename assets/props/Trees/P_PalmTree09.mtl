@@ -1,0 +1,8 @@
+newmtl M_PalmBark
+Kd 0.3333333 0.4078431 0.2470587
+Ka 0.3333333 0.4078431 0.2470587
+map_Kd textures/T_PalmWood_BC.bmp
+newmtl M_PalmLeaves
+Kd 0 0 0
+Ka 0 0 0
+map_Kd textures/T_Leaf_Palm_BC.bmp

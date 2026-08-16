@@ -1,0 +1,4 @@
+newmtl MV_OakBarkMisc
+Kd 0.9333334 0.8274511 0.4470589
+Ka 0.9333334 0.8274511 0.4470589
+map_Kd textures/T_OakBark_BC.bmp

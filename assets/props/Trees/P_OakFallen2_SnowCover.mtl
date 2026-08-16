@@ -1,0 +1,8 @@
+newmtl MV_OakBarkMisc_Snow
+Kd 0.517647 0.4470589 0.2823529
+Ka 0.517647 0.4470589 0.2823529
+map_Kd textures/T_OakBarkMisc_BC.bmp
+newmtl M_Snow
+Kd 1 1 1
+Ka 1 1 1
+map_Kd textures/T_Snow_BC.bmp

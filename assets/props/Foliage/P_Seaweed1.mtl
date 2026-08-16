@@ -1,0 +1,4 @@
+newmtl M_Seaweed
+Kd 0.3914099 0.61 0.13847
+Ka 0.6666667 0.6235294 0.4039216
+map_Kd textures/T_Leaf_Bush.bmp

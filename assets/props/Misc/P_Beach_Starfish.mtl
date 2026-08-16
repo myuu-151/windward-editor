@@ -1,0 +1,4 @@
+newmtl MV_BeachShells
+Kd 0 0 0
+Ka 0 0 0
+map_Kd textures/T_BeachShells_BC.bmp

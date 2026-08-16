@@ -1,0 +1,8 @@
+newmtl M_BambooBark
+Kd 0.3333333 0.4078431 0.2470587
+Ka 0.3333333 0.4078431 0.2470587
+map_Kd textures/T_BirchBark_R.bmp
+newmtl MV_BambooLeaves_Sapling
+Kd 0.6439659 0.8666667 0.2825333
+Ka 0.1137255 0.7921569 0.3803921
+map_Kd textures/T_Leaf_Bamboo.bmp

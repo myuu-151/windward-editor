@@ -1,0 +1,4 @@
+newmtl M_KnotwoodBark
+Kd 0.3333333 0.4078431 0.2470587
+Ka 0.3333333 0.4078431 0.2470587
+map_Kd textures/T_KnotwoodBark_BC.bmp

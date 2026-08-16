@@ -1,0 +1,17 @@
+style Trees/P_BambooSaplingClump2|Trunk T_BirchBark_R.bmp 0.333333 0.407843 0.247059 0.333333 0.407843 0.247059
+style Trees/P_Bamboo1|Trunk T_BirchBark_R.bmp 0.333333 0.407843 0.247059 0.333333 0.407843 0.247059
+style Trees/P_BambooSaplingClump1|Trunk T_BirchBark_R.bmp 0.333333 0.407843 0.247059 0.333333 0.407843 0.247059
+style Trees/P_Bamboo2|Trunk T_BirchBark_R.bmp 0.333333 0.407843 0.247059 0.352587 0.451777 0.237737
+style Trees/P_BambooFallen|Trunk T_BirchBark_R.bmp 0.333333 0.407843 0.247059 0.333333 0.407843 0.247059
+style Trees/P_Bamboo3|Trunk T_BirchBark_R.bmp 0.333333 0.407843 0.247059 0.333333 0.407843 0.247059
+style Trees/P_Bamboo4|Trunk T_BirchBark_R.bmp 0.333333 0.407843 0.247059 0.333333 0.407843 0.247059
+style Trees/P_BambooSapling1|Trunk T_BirchBark_R.bmp 0.333333 0.407843 0.247059 0.333333 0.407843 0.247059
+style Trees/P_BambooSapling2|Trunk T_BirchBark_R.bmp 0.333333 0.407843 0.247059 0.333333 0.407843 0.247059
+style Trees/P_BambooSapling3|Trunk T_BirchBark_R.bmp 0.333333 0.407843 0.247059 0.333333 0.407843 0.247059
+style Trees/P_BambooSapling4|Trunk T_BirchBark_R.bmp 0.333333 0.407843 0.247059 0.333333 0.407843 0.247059
+style Trees/P_BambooSapling5|Trunk T_BirchBark_R.bmp 0.333333 0.407843 0.247059 0.333333 0.407843 0.247059
+style Trees/P_BambooSaplingClump3|Trunk T_BirchBark_R.bmp 0.333333 0.407843 0.247059 0.333333 0.407843 0.247059
+style Trees/P_BambooSprout1|Trunk T_BirchBark_R.bmp 0.333333 0.407843 0.247059 0.333333 0.407843 0.247059
+style Trees/P_BambooStump1|Trunk T_BirchBark_R.bmp 0.333333 0.407843 0.247059 0.333333 0.407843 0.247059
+style Trees/P_BambooStump2|Trunk T_BirchBark_R.bmp 0.333333 0.407843 0.247059 0.333333 0.407843 0.247059
+style Trees/P_Bamboo2|Leaves T_Leaf_Bamboo.bmp 0.772927 1.000000 0.404399 1.000000 0.934706 0.387479

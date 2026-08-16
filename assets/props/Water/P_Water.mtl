@@ -1,0 +1,4 @@
+newmtl M_StylizedWater
+Kd 0.858 0.858 0.858
+Ka 0.858 0.858 0.858
+map_Kd textures/T_NoiseSmooth.bmp

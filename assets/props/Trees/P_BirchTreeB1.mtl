@@ -1,0 +1,8 @@
+newmtl M_BirchBark
+Kd 0.3333333 0.4078431 0.2470587
+Ka 0.3333333 0.4078431 0.2470587
+map_Kd textures/T_BirchBark_BC.bmp
+newmtl M_BirchLeaves
+Kd 1 0.9644863 0
+Ka 0.8679245 0.7368501 0
+map_Kd textures/T_Leaf_Deciduous.bmp

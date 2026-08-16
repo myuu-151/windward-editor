@@ -1,0 +1,4 @@
+newmtl MV_RedFerns
+Kd 1 1 1
+Ka 0 0 0
+map_Kd textures/T_FoliageSheet_BC.bmp

@@ -1,0 +1,8 @@
+newmtl M_FirBark
+Kd 0.5764706 0.4156863 0.2666667
+Ka 0.5764706 0.4156863 0.2666667
+map_Kd textures/T_FirBark_BC.bmp
+newmtl MV_FirLeaves_Dry
+Kd 0.5667846 0.6415094 0.3116767
+Ka 0.6320754 0.5580351 0.1878337
+map_Kd textures/T_OakBark_BC.bmp

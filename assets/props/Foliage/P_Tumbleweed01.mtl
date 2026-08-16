@@ -1,0 +1,4 @@
+newmtl M_Tumbleweed
+Kd 0 0 0
+Ka 0 0 0
+map_Kd textures/T_Tumbleweed_BC.bmp

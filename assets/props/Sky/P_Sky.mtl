@@ -1,0 +1,8 @@
+newmtl M_StylizedSky
+Kd 1 1 1
+Ka 1 1 1
+map_Kd textures/T_BackroundClouds1B.bmp
+newmtl M_Clouds
+Kd 1 1 1
+Ka 1 1 1
+map_Kd textures/T_CloudLayer02.bmp

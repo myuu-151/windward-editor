@@ -1,0 +1,8 @@
+newmtl MV_OakLeaves_Snowy
+Kd 0.7686275 0.8235295 0.8705883
+Ka 0.1001246 0.2357784 0.4716981
+map_Kd textures/T_Leaf_Deciduous.bmp
+newmtl MV_OakBark_Snow
+Kd 0.517647 0.4470589 0.2823529
+Ka 0.517647 0.4470589 0.2823529
+map_Kd textures/T_OakBark_BC.bmp

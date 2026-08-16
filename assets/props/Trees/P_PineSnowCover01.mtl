@@ -1,0 +1,12 @@
+newmtl MV_PineBark_Snow
+Kd 0.3333333 0.4078431 0.2470587
+Ka 0.3333333 0.4078431 0.2470587
+map_Kd textures/T_PineBark_BC.bmp
+newmtl MV_PineLeaves_SnowCover
+Kd 0.8431372 0.9746129 1
+Ka 0.3754005 0.5609504 0.7169812
+map_Kd textures/T_Leaf_Pine.bmp
+newmtl M_Snow
+Kd 1 1 1
+Ka 1 1 1
+map_Kd textures/T_Snow_BC.bmp

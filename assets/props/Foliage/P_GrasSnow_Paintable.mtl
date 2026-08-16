@@ -1,0 +1,4 @@
+newmtl MV_GrassSnow
+Kd 0.6763771 0.791317 0.809
+Ka 0.735849 0.735849 0.735849
+map_Kd textures/T_FoliageSheet_BC.bmp

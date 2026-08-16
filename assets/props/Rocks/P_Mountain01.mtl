@@ -1,0 +1,4 @@
+newmtl MV_Mountain
+Kd 1 1 1
+Ka 1 1 1
+map_Kd textures/T_RockClassic_BC.bmp

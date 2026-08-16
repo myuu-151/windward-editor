@@ -1,9 +1,8 @@
 # build output
 build/
 
-# textures derived from the Awaii Studio pack (Asset Store EULA:
-# fine in game builds, not redistributable as assets)
-assets/
+# The editor is unusable without its assets, so they are committed here
+# to keep a clone self-contained. They are derived from a licensed Unity
+# Asset Store pack: fine as a private backup for the licence holder,
+# NOT redistributable -- this repository must stay private.
 
-# local editor state
-map.bin

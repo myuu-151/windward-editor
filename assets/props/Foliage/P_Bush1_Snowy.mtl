@@ -1,0 +1,4 @@
+newmtl M_BushLeaves_Snow
+Kd 0.7531333 0.8666667 0.86099
+Ka 0.3214667 0.3983991 0.5283019
+map_Kd textures/T_Leaf_Bush.bmp

@@ -1,0 +1,4 @@
+newmtl MV_BushDesertB
+Kd 0.745 0.6439091 0.36952
+Ka 0 0 0
+map_Kd textures/T_Leaf_Bush.bmp

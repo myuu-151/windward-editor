@@ -1,0 +1,4 @@
+newmtl M_Sandfall
+Kd 1 0.7622222 0.5803921
+Ka 1 0.7750981 0.6352941
+map_Kd textures/T_Waterlines.bmp

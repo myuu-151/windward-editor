@@ -1,0 +1,8 @@
+newmtl M_RedMapleBark
+Kd 0.6980392 0.3968959 0.3294117
+Ka 0.6980392 0.3968959 0.3294117
+map_Kd textures/T_RedMapleBark_BC.bmp
+newmtl M_RedMaple_Gold
+Kd 0.990566 0.8427448 0.2756764
+Ka 0.7830188 0.2326636 0
+map_Kd textures/T_MapleLeaves.bmp

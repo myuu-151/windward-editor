@@ -1,0 +1,8 @@
+newmtl M_DesertPalmBark
+Kd 0.6784314 0.5333333 0.4941176
+Ka 0.6784314 0.5333333 0.4941176
+map_Kd textures/T_DesertPalm_BC.bmp
+newmtl M_DesertPalmLeaves
+Kd 0 0 0
+Ka 0 0 0
+map_Kd textures/T_Leaf_DesertPalm_BC.bmp

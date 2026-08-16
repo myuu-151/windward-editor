@@ -1,0 +1,8 @@
+newmtl M_YuccaBark
+Kd 0.5960784 0.5098039 0.4039216
+Ka 0.5960784 0.5098039 0.4039216
+map_Kd textures/T_OakBark_BC.bmp
+newmtl M_YuccaLeaves
+Kd 0 0 0
+Ka 0 0 0
+map_Kd textures/T_MapleLeaves.bmp

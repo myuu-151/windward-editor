@@ -1,0 +1,8 @@
+newmtl M_WindsweptBark
+Kd 0.6784314 0.5333333 0.4941176
+Ka 0.6784314 0.5333333 0.4941176
+map_Kd textures/T_WindsweptBark_BC.bmp
+newmtl M_WindsweptLeaves
+Kd 0.887 0.7391988 0.433743
+Ka 0.6886792 0.3580448 0.1526788
+map_Kd textures/T_MapleLeaves.bmp

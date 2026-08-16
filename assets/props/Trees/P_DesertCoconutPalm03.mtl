@@ -1,0 +1,8 @@
+newmtl M_DesertCoconutPalmBark
+Kd 0.3686274 0.2470588 0.1647058
+Ka 0.3686274 0.2470588 0.1647058
+map_Kd textures/T_CoconutPalmBark_BC.bmp
+newmtl M_DesertCoconutPalmLeaves
+Kd 0.1177982 1 0
+Ka 0 0 0
+map_Kd textures/T_Leaf_ChinaPine.bmp
