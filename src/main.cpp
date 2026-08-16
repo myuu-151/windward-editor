@@ -951,10 +951,11 @@ static bool ray_terrain(const float ro[3], const float rd[3], float out[3])
 enum BrushMode { BRUSH_RAISE, BRUSH_SMOOTH, BRUSH_FLATTEN,
                  BRUSH_SHARPEN, BRUSH_TERRACE,
                  BRUSH_EXPAND, BRUSH_CONTRACT,
+                 BRUSH_SHAPE, BRUSH_TAPER,
                  BRUSH_DIRT, BRUSH_DIRT2, BRUSH_ERASEDIRT,
                  BRUSH_GRASS, BRUSH_KILLGRASS };
 
-static const float kBrushColors[12][3] = {
+static const float kBrushColors[14][3] = {
     { 1.0f, 0.85f, 0.3f },   // raise: yellow
     { 0.4f, 0.8f, 1.0f },    // smooth: blue
     { 0.9f, 0.5f, 0.9f },    // flatten: purple
@@ -962,15 +963,18 @@ static const float kBrushColors[12][3] = {
     { 0.3f, 0.9f, 0.8f },    // terrace: teal
     { 0.6f, 1.0f, 0.6f },    // expand land: light green
     { 0.3f, 0.5f, 1.0f },    // contract land: deep blue
+    { 1.0f, 0.4f, 0.6f },    // shape paint: pink
+    { 0.55f, 0.85f, 1.0f },  // taper to sea: pale blue
     { 0.72f, 0.5f, 0.28f },  // path dirt: brown
     { 0.85f, 0.75f, 0.5f },  // soft dirt: sand
     { 0.35f, 0.8f, 0.35f },  // grass ground (erases dirt): deep green
     { 0.5f, 1.0f, 0.4f },    // grass blades: bright green
     { 0.9f, 0.35f, 0.3f },   // remove grass: red
 };
-static const char* kBrushNames[12] = { "Sculpt", "Smooth", "Flatten",
+static const char* kBrushNames[14] = { "Sculpt", "Smooth", "Flatten",
                                        "Sharpen", "Terrace",
                                        "Expand", "Contract",
+                                       "Shape Paint", "Taper to Sea",
                                        "Path Dirt", "Soft Dirt", "Grass Ground",
                                        "Grass Blades", "Remove Grass" };
 
@@ -986,7 +990,9 @@ struct Snapshot {
 static std::vector<Snapshot> gUndoStack, gRedoStack;
 
 static std::vector<float> gShoreBase;   // heights before any shoreline
+static std::vector<float> gGenBase;     // heights before the generator
 static void mark_all_dirty();
+static float cpu_vnoise(float x, float y);
 static bool gMapResized = false;   // a load changed the world size
 
 // Resize the world: resample every layer into the new resolution so the
@@ -1054,6 +1060,11 @@ static void resize_map(float newHalf)
         for (float& v : nb) v *= hscale;
         gShoreBase.swap(nb);
     }
+    if (!gGenBase.empty()) {
+        std::vector<float> ng = resample_f(gGenBase, HN, nHN);
+        for (float& v : ng) v *= hscale;
+        gGenBase.swap(ng);
+    }
     std::vector<Uint8> m1 = resample_u8(gMask, MASK_N, nMask);
     std::vector<Uint8> m2 = resample_u8(gMask2, MASK_N, nMask);
     std::vector<Uint8> mk = resample_u8(gKill, MASK_N, nMask);
@@ -1073,6 +1084,122 @@ static void resize_map(float newHalf)
     mark_all_dirty();
     SDL_Log("map resized to %.0f units: grid %d, heights %d, masks %d",
             newHalf * 2.0f, GRID_N, HN, MASK_N);
+}
+
+// Grow the map outward WITHOUT rescaling anything already sculpted: the
+// island keeps its world position and size, and the new ring of ground
+// continues each border height and tapers it down under the sea.
+// A heightmap cannot be pushed sideways past its own bounds -- sculpt
+// into the rim and the mesh is just sliced off flat -- so widening the
+// canvas is the only way land keeps growing outward. Resolutions come
+// from the same tier table as everything else, so the added ground has
+// the same polygon density as the old.
+static void grow_canvas(float newHalf, float seaLevel)
+{
+    if (newHalf <= TER_HALF + 0.01f)
+        return;
+    const float oldHalf = TER_HALF;
+    const float margin = newHalf - oldHalf;
+    int nGrid, nHN, nMask, nGrass;
+    resolutions_for(newHalf, &nGrid, &nHN, &nMask, &nGrass);
+
+    // bilinear sample of an old-resolution field at a world position,
+    // clamped to the border so outside lookups give the rim height
+    auto sampleOld = [&](const std::vector<float>& src, float x, float z) {
+        float fx = SDL_clamp((x + oldHalf) / (2.0f * oldHalf), 0.0f, 1.0f) *
+                   (HN - 1);
+        float fz = SDL_clamp((z + oldHalf) / (2.0f * oldHalf), 0.0f, 1.0f) *
+                   (HN - 1);
+        int i0 = SDL_clamp((int)fx, 0, HN - 2), j0 = SDL_clamp((int)fz, 0, HN - 2);
+        float fu = fx - i0, fv = fz - j0;
+        float a = src[(size_t)j0 * HN + i0], b = src[(size_t)j0 * HN + i0 + 1];
+        float c = src[(size_t)(j0 + 1) * HN + i0];
+        float d = src[(size_t)(j0 + 1) * HN + i0 + 1];
+        return (a * (1 - fu) + b * fu) * (1 - fv) +
+               (c * (1 - fu) + d * fu) * fv;
+    };
+    auto growField = [&](const std::vector<float>& src) {
+        std::vector<float> dst((size_t)nHN * nHN, 0.0f);
+        const float cell = 2.0f * newHalf / (nHN - 1);
+        for (int j = 0; j < nHN; j++)
+            for (int i = 0; i < nHN; i++) {
+                float x = -newHalf + cell * i, z = -newHalf + cell * j;
+                float edgeH = sampleOld(src, x, z);
+                float out = SDL_max(fabsf(x) - oldHalf, fabsf(z) - oldHalf);
+                if (out <= 0.0f) {
+                    dst[(size_t)j * nHN + i] = edgeH;
+                    continue;
+                }
+                // ragged reach so the new coast is not a square ring
+                float wob = (cpu_vnoise(x * 0.11f, z * 0.11f) - 0.5f) * 0.55f +
+                            (cpu_vnoise(x * 0.29f, z * 0.29f) - 0.5f) * 0.25f;
+                float t = SDL_clamp(out / SDL_max(0.5f, margin * (1.0f + wob)),
+                                    0.0f, 1.0f);
+                float s = t * t * (3.0f - 2.0f * t);
+                float h = edgeH * (1.0f - s) + (seaLevel - 2.0f) * s;
+                h += (cpu_vnoise(x * 0.18f, z * 0.18f) - 0.5f) * 1.6f *
+                     (1.0f - s);
+                dst[(size_t)j * nHN + i] = SDL_min(h, edgeH);
+            }
+        return dst;
+    };
+    auto growMask = [&](const std::vector<Uint8>& src, Uint8 outside) {
+        std::vector<Uint8> dst((size_t)nMask * nMask, outside);
+        const float cell = 2.0f * newHalf / nMask;
+        for (int j = 0; j < nMask; j++)
+            for (int i = 0; i < nMask; i++) {
+                float x = -newHalf + (i + 0.5f) * cell;
+                float z = -newHalf + (j + 0.5f) * cell;
+                if (fabsf(x) > oldHalf || fabsf(z) > oldHalf)
+                    continue;
+                int si = SDL_clamp((int)((x + oldHalf) / (2.0f * oldHalf) *
+                                         MASK_N), 0, MASK_N - 1);
+                int sj = SDL_clamp((int)((z + oldHalf) / (2.0f * oldHalf) *
+                                         MASK_N), 0, MASK_N - 1);
+                dst[(size_t)j * nMask + i] = src[(size_t)sj * MASK_N + si];
+            }
+        return dst;
+    };
+
+    std::vector<float> nh = growField(gHeights);
+    std::vector<float> nShore, nGen;
+    if (gShoreBase.size() == gHeights.size()) nShore = growField(gShoreBase);
+    if (gGenBase.size() == gHeights.size())   nGen   = growField(gGenBase);
+    std::vector<Uint8> m1 = growMask(gMask, 0);
+    std::vector<Uint8> m2 = growMask(gMask2, 0);
+    std::vector<Uint8> mk = growMask(gKill, 255);   // no blades on new ground
+
+    gHeights.swap(nh);
+    gShoreBase.swap(nShore);
+    gGenBase.swap(nGen);
+    gMask.swap(m1); gMask2.swap(m2); gKill.swap(mk);
+    // props and the waterline are in world units and do not move
+
+    TER_HALF = newHalf;
+    HN = nHN; MASK_N = nMask; GRID_N = nGrid; GRASS_N = nGrass;
+    gUndoStack.clear();
+    gRedoStack.clear();
+    mark_all_dirty();
+    SDL_Log("map grew to %.0f units (sculpt untouched): grid %d, heights %d",
+            newHalf * 2.0f, GRID_N, HN);
+}
+
+// is there land near the map boundary that wants somewhere to go?
+static bool land_at_edge(float seaLevel)
+{
+    int band = SDL_max(2, HN / 20);
+    for (int j = 0; j < HN; j++) {
+        bool rowEdge = (j < band || j >= HN - band);
+        for (int i = 0; i < HN; i++) {
+            if (!rowEdge && i >= band && i < HN - band) {
+                i = HN - band - 1;   // skip the interior
+                continue;
+            }
+            if (gHeights[(size_t)j * HN + i] > seaLevel + 0.3f)
+                return true;
+        }
+    }
+    return false;
 }
 
 static void mark_all_dirty()
@@ -1162,6 +1289,156 @@ static void apply_shoreline(float seaLevel)
             float base = gShoreBase[j * HN + i];
             gHeights[j * HN + i] =
                 SDL_min(base, base * t + (seaLevel - gShore.drop) * (1.0f - t));
+        }
+    gHeightsDirty = true;
+}
+
+// ------------------------------------------------------- island generator
+// A whole island from a seed and a set of shape controls. Everything is
+// evaluated in normalized map coordinates (-1..1), so a generated island
+// keeps its proportions at any map size, and every control is continuous
+// -- dragging a slider re-runs the generator from a pristine snapshot the
+// way the shoreline does, so nothing compounds and nothing is destroyed
+// until you bake it.
+struct GenParams {
+    int   seed = 1337;
+    float size = 0.62f;      // island radius, fraction of the map half
+    float coast = 0.38f;     // width of the falloff into the sea
+    float lumps = 0.45f;     // how much the coastline radius wanders
+    float warp = 0.5f;       // domain warp: bends the whole shape organic
+    float height = 8.0f;     // peak land height in world units
+    float rough = 0.55f;     // terrain noise vs a smooth dome
+    int   detail = 5;        // fbm octaves
+    float fscale = 3.2f;     // feature frequency
+    float ridge = 0.3f;      // billowy blobs .. sharp mountain spines
+    int   peaks = 2;         // seeded summits on top of the noise
+    float peakH = 0.7f;
+    float peakSpread = 0.5f; // how far the summits sit from the centre
+    float plateau = 0.0f;    // soft ceiling: mesa tops
+    float terr = 0.0f;       // terrace step height, 0 = off
+    float beach = 0.3f;      // widens the gentle land near the water
+    float drop = 2.0f;       // sea floor depth outside the island
+    bool  add = false;       // layer over the existing sculpt
+    bool  on = false;
+};
+static GenParams gGen;
+
+// value noise in [0,1] over an arbitrary seed offset
+static float gen_fbm(float x, float y, int oct, float ridge)
+{
+    float v = 0.0f, a = 0.5f, f = 1.0f, norm = 0.0f;
+    for (int i = 0; i < oct; i++) {
+        float n = cpu_vnoise(x * f, y * f);
+        if (ridge > 0.0f) {
+            // ridged: fold the noise about its midpoint so the creases
+            // become sharp crests instead of round lumps
+            float r = 1.0f - fabsf(n * 2.0f - 1.0f);
+            n = n * (1.0f - ridge) + r * r * ridge;
+        }
+        v += a * n;
+        norm += a;
+        f *= 2.03f;
+        a *= 0.5f;
+    }
+    return v / SDL_max(0.0001f, norm);
+}
+
+// the terrain detail alone, centred on zero -- shared by the generator and
+// the Shape Paint brush so painted deformations match generated ones
+static float gen_detail(float u, float v)
+{
+    float so = gGen.seed * 0.7913f;
+    float wx = cpu_vnoise(u * 1.7f + so, v * 1.7f - so) - 0.5f;
+    float wy = cpu_vnoise(u * 1.7f + so + 37.0f, v * 1.7f - so + 11.0f) - 0.5f;
+    float pu = u + wx * gGen.warp, pv = v + wy * gGen.warp;
+    return gen_fbm(pu * gGen.fscale + so, pv * gGen.fscale - so,
+                   SDL_clamp(gGen.detail, 1, 8), gGen.ridge) - 0.5f;
+}
+
+// Land height and coverage at a normalized position. mask is 1 inland,
+// 0 out at sea, so callers can either replace the terrain (blend down to
+// the sea floor) or add the land on top of what is already there.
+static float gen_land(float u, float v, float* maskOut)
+{
+    const GenParams& g = gGen;
+    float so = g.seed * 0.7913f;
+    // warp first: the coastline and the terrain bend together, which is
+    // what stops generated islands from looking like circles with noise
+    float wx = cpu_vnoise(u * 1.7f + so, v * 1.7f - so) - 0.5f;
+    float wy = cpu_vnoise(u * 1.7f + so + 37.0f, v * 1.7f - so + 11.0f) - 0.5f;
+    float pu = u + wx * g.warp, pv = v + wy * g.warp;
+
+    float r = sqrtf(pu * pu + pv * pv);
+    // radius varies with angle; sampling the noise ON the unit circle
+    // keeps it seamless where the angle wraps
+    float ang = atan2f(pv, pu);
+    float lump = (cpu_vnoise(cosf(ang) * 2.2f + so * 3.0f,
+                             sinf(ang) * 2.2f - so * 3.0f) - 0.5f) * 2.0f +
+                 (cpu_vnoise(cosf(ang) * 5.1f - so,
+                             sinf(ang) * 5.1f + so) - 0.5f);
+    float R = SDL_max(0.05f, g.size * (1.0f + lump * g.lumps));
+    float coastW = SDL_max(0.02f, g.coast * g.size);
+    float t = SDL_clamp((R - r) / coastW, 0.0f, 1.0f);
+    float mask = t * t * (3.0f - 2.0f * t);
+
+    float h = gen_fbm(pu * g.fscale + so, pv * g.fscale - so,
+                      SDL_clamp(g.detail, 1, 8), g.ridge);
+    h = 0.45f + (h - 0.5f) * g.rough * 1.8f;
+
+    for (int p = 0; p < g.peaks; p++) {
+        float a = cpu_vnoise(g.seed * 0.031f + p * 4.7f, p * 2.3f) * 6.2831853f;
+        float d = 0.25f + cpu_vnoise(p * 9.1f, g.seed * 0.017f) * 0.75f;
+        float px = cosf(a) * d * g.peakSpread * g.size;
+        float pz = sinf(a) * d * g.peakSpread * g.size;
+        float dx = (pu - px) / (0.42f * g.size), dz = (pv - pz) / (0.42f * g.size);
+        float dd = dx * dx + dz * dz;
+        h += g.peakH * expf(-dd * 1.6f);
+    }
+    if (h < 0.0f) h = 0.0f;
+
+    if (g.plateau > 0.0f) {
+        // soft ceiling rather than a clamp, so the mesa top still reads
+        // as terrain instead of a machined flat
+        float cap = 1.0f - g.plateau * 0.55f;
+        if (h > cap)
+            h = cap + (h - cap) * (1.0f - g.plateau * 0.9f);
+    }
+    if (g.beach > 0.0f) {
+        // stretch the shallow band: land near the water rises slower
+        float b = SDL_clamp(mask / SDL_max(0.05f, g.beach * 0.7f), 0.0f, 1.0f);
+        h *= b * b * (3.0f - 2.0f * b);
+    }
+    if (g.terr > 0.01f) {
+        float step = g.terr / SDL_max(0.5f, g.height);
+        h = roundf(h / step) * step;
+    }
+    if (maskOut)
+        *maskOut = mask;
+    return h * g.height * mask;
+}
+
+// Rebuild the terrain from the generator. Non-destructive: always starts
+// from the snapshot taken when the generator was switched on.
+static void apply_generator(float seaLevel)
+{
+    if (gGenBase.size() != gHeights.size())
+        return;
+    if (!gGen.on) {
+        gHeights = gGenBase;
+        gHeightsDirty = true;
+        return;
+    }
+    const float cell = 2.0f * TER_HALF / (HN - 1);
+    for (int j = 0; j < HN; j++)
+        for (int i = 0; i < HN; i++) {
+            float u = (-TER_HALF + cell * i) / TER_HALF;
+            float v = (-TER_HALF + cell * j) / TER_HALF;
+            float mask = 0.0f;
+            float land = gen_land(u, v, &mask);
+            float base = gGenBase[j * HN + i];
+            gHeights[j * HN + i] =
+                gGen.add ? base + land
+                         : land * mask + (seaLevel - gGen.drop) * (1.0f - mask);
         }
     gHeightsDirty = true;
 }
@@ -1797,7 +2074,7 @@ static void apply_brush(BrushMode mode, float cx, float cz, float radius,
                         float dt, bool invert, float strength = 1.0f,
                         float paintTarget = 1.0f)
 {
-    if (mode <= BRUSH_CONTRACT) {
+    if (mode <= BRUSH_TAPER) {
         dt *= strength;
         float cell = 2.0f * TER_HALF / (HN - 1);
         int i0 = SDL_clamp((int)((cx - radius + TER_HALF) / cell), 0, HN - 1);
@@ -1806,7 +2083,8 @@ static void apply_brush(BrushMode mode, float cx, float cz, float radius,
         int j1 = SDL_clamp((int)((cz + radius + TER_HALF) / cell) + 1, 0, HN - 1);
         std::vector<float> snap;
         if (mode == BRUSH_SMOOTH || mode == BRUSH_SHARPEN ||
-            mode == BRUSH_EXPAND || mode == BRUSH_CONTRACT)
+            mode == BRUSH_EXPAND || mode == BRUSH_CONTRACT ||
+            mode == BRUSH_TAPER)
             snap = gHeights;
         for (int j = j0; j <= j1; j++)
             for (int i = i0; i <= i1; i++) {
@@ -1840,6 +2118,29 @@ static void apply_brush(BrushMode mode, float cx, float cz, float radius,
                                                           : SDL_min(best, v);
                         }
                     h += (best - h) * SDL_min(1.0f, 6.0f * w * dt);
+                } else if (mode == BRUSH_SHAPE) {
+                    // paint the generator's own terrain detail in by hand,
+                    // so hand-sculpted ground matches generated ground
+                    float n = gen_detail(x / TER_HALF, z / TER_HALF);
+                    h += (invert ? -1.0f : 1.0f) * n * 2.2f *
+                         SDL_max(1.0f, gGen.height) * w * dt;
+                } else if (mode == BRUSH_TAPER) {
+                    // roll the land down into the water: lowering alone
+                    // leaves a step, so this averages as it sinks and the
+                    // edge comes out as a beach rather than a cut
+                    float sum = 0.0f;
+                    int n = 0;
+                    for (int dj = -3; dj <= 3; dj++)
+                        for (int di = -3; di <= 3; di++) {
+                            int ii = SDL_clamp(i + di, 0, HN - 1);
+                            int jj = SDL_clamp(j + dj, 0, HN - 1);
+                            sum += snap[jj * HN + ii];
+                            n++;
+                        }
+                    float sea = gWaterline - 0.6f;
+                    float target = invert ? sum / n
+                                          : sum / n * 0.45f + sea * 0.55f;
+                    h += (target - h) * SDL_min(1.0f, 5.0f * w * dt);
                 } else if (mode == BRUSH_SHARPEN) {
                     // unsharp mask: push height away from the local average
                     // so slopes steepen into defined sides
@@ -1976,6 +2277,13 @@ struct TuneBlob {
     int showWater = 1;
     float islandFrill = 0.0f;
     float islandBulge = 0.0f;
+    // island generator (appended: older maps just get the defaults)
+    int   genSeed = 1337, genDetail = 5, genPeaks = 2, genAdd = 0, genOn = 0;
+    float genSize = 0.62f, genCoast = 0.38f, genLumps = 0.45f, genWarp = 0.5f;
+    float genHeight = 8.0f, genRough = 0.55f, genScale = 3.2f, genRidge = 0.3f;
+    float genPeakH = 0.7f, genSpread = 0.5f, genPlateau = 0.0f;
+    float genTerr = 0.0f, genBeach = 0.3f, genDrop = 2.0f;
+    int   autoGrow = 1;
 };
 static TuneBlob gTune;
 static bool gLoadedTune = false;
@@ -2544,6 +2852,16 @@ int main(int argc, char** argv)
         gShoreBase.clear();
         gShore.on = false;
     };
+    // widen the canvas around the sculpt, keeping it exactly where it is
+    auto apply_canvas_grow = [&](float newHalf) {
+        grow_canvas(newHalf, gWaterline);
+        rebuild_terrain_mesh();
+        rebuild_grass_instances();
+        glBindBuffer(GL_ARRAY_BUFFER, instVbo);
+        glBufferData(GL_ARRAY_BUFFER, inst.size() * sizeof(float),
+                     inst.data(), GL_STATIC_DRAW);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+    };
 
     GLuint emptyVao = 0;
     glGenVertexArrays(1, &emptyVao);
@@ -2719,6 +3037,7 @@ int main(int argc, char** argv)
     float bladeDensity = 0.8f;
     bool showGrass = true;
     bool shadowsOn = true;
+    bool autoGrow = true;   // widen the map when a sculpt reaches the rim
     // generated land beyond the map bounds
     bool extendOn = false;
     float extendDist = 10.0f, extendNoise = 0.6f, extendDrop = 3.0f;
@@ -2781,6 +3100,17 @@ int main(int argc, char** argv)
         gTune.showWater = gShowWater ? 1 : 0;
         gTune.islandFrill = islandFrill;
         gTune.islandBulge = islandBulge;
+        gTune.genSeed = gGen.seed;      gTune.genDetail = gGen.detail;
+        gTune.genPeaks = gGen.peaks;    gTune.genAdd = gGen.add ? 1 : 0;
+        gTune.genOn = gGen.on ? 1 : 0;  gTune.genSize = gGen.size;
+        gTune.genCoast = gGen.coast;    gTune.genLumps = gGen.lumps;
+        gTune.genWarp = gGen.warp;      gTune.genHeight = gGen.height;
+        gTune.genRough = gGen.rough;    gTune.genScale = gGen.fscale;
+        gTune.genRidge = gGen.ridge;    gTune.genPeakH = gGen.peakH;
+        gTune.genSpread = gGen.peakSpread;
+        gTune.genPlateau = gGen.plateau; gTune.genTerr = gGen.terr;
+        gTune.genBeach = gGen.beach;    gTune.genDrop = gGen.drop;
+        gTune.autoGrow = autoGrow ? 1 : 0;
         memset(gTune.propSelId, 0, sizeof gTune.propSelId);
         if (propSel >= 0 && propSel < (int)gPropMeshes.size())
             SDL_strlcpy(gTune.propSelId,
@@ -2811,7 +3141,7 @@ int main(int argc, char** argv)
             gGrassPattern = SDL_clamp(gTune.grassPattern, 0, 2);
             showGrass = gTune.showGrass != 0;
             propRandomYaw = gTune.randomYaw != 0;
-            sculptTool = SDL_clamp(gTune.sculptTool, 0, 6);
+            sculptTool = SDL_clamp(gTune.sculptTool, 0, 8);
             paintLayer = SDL_clamp(gTune.paintLayer, 0, 2);
             detailTool = SDL_clamp(gTune.detailTool, 0, 1);
             propTool = SDL_clamp(gTune.propTool, 0, 3);
@@ -2826,6 +3156,23 @@ int main(int argc, char** argv)
             gShowWater = gTune.showWater != 0;
             islandFrill = gTune.islandFrill;
             islandBulge = gTune.islandBulge;
+            gGen.seed = gTune.genSeed;
+            gGen.detail = SDL_clamp(gTune.genDetail, 1, 8);
+            gGen.peaks = SDL_clamp(gTune.genPeaks, 0, 6);
+            gGen.add = gTune.genAdd != 0;
+            // the generator's live state cannot survive a reload -- its
+            // "before" snapshot is not in the file -- so the sliders come
+            // back but the terrain stays as it was saved
+            gGen.on = false;
+            gGenBase.clear();
+            gGen.size = gTune.genSize;      gGen.coast = gTune.genCoast;
+            gGen.lumps = gTune.genLumps;    gGen.warp = gTune.genWarp;
+            gGen.height = gTune.genHeight;  gGen.rough = gTune.genRough;
+            gGen.fscale = gTune.genScale;   gGen.ridge = gTune.genRidge;
+            gGen.peakH = gTune.genPeakH;    gGen.peakSpread = gTune.genSpread;
+            gGen.plateau = gTune.genPlateau; gGen.terr = gTune.genTerr;
+            gGen.beach = gTune.genBeach;    gGen.drop = gTune.genDrop;
+            autoGrow = gTune.autoGrow != 0;
             if (gTune.propSelId[0]) {
                 for (int mi = 0; mi < (int)gPropMeshes.size(); mi++)
                     if (mesh_id(gPropMeshes[mi]) == gTune.propSelId) {
@@ -3110,6 +3457,13 @@ int main(int argc, char** argv)
                     }
                 }
             }
+            // A stroke that pushed land into the rim has nowhere left to
+            // go, so grow the canvas around it: same sculpt, same scale,
+            // more ground to keep pushing into.
+            if (autoGrow && wasPainting && !painting && activeTab == 0 &&
+                mode <= BRUSH_TAPER && TER_HALF < 400.0f &&
+                land_at_edge(gWaterline))
+                apply_canvas_grow(TER_HALF * 1.3f);
             wasPainting = painting;
             if (selInst >= (int)gProps.size())
                 selInst = -1;
@@ -3524,8 +3878,9 @@ int main(int argc, char** argv)
                     const char* tools[] = { "Raise or Lower Terrain",
                                             "Smooth Height", "Flatten",
                                             "Sharpen Edges", "Terrace",
-                                            "Expand Land", "Contract Land" };
-                    ImGui::Combo("##sculpttool", &sculptTool, tools, 7);
+                                            "Expand Land", "Contract Land",
+                                            "Shape Paint", "Taper to Sea" };
+                    ImGui::Combo("##sculpttool", &sculptTool, tools, 9);
                     static const char* helps[] = {
                         "Left click to raise.\nHold Shift and left click to "
                         "lower.\nHold Ctrl to smooth.\nHold Alt to flatten.",
@@ -3540,12 +3895,19 @@ int main(int argc, char** argv)
                         "grows land sideways without changing its shape.",
                         "Pull the coastline and cliff bases INWARD -- "
                         "carves land back sideways, opening water.",
+                        "Paint the Shape tab's terrain detail in by hand -- "
+                        "same noise, seed and ridges as the generator.\n"
+                        "Hold Shift to carve it in instead.",
+                        "Roll the land down into the water, smoothing as it "
+                        "sinks, so edges end as beaches instead of cliffs.\n"
+                        "Hold Shift to just smooth without lowering.",
                     };
                     ImGui::TextWrapped("%s", helps[sculptTool]);
                     static const BrushMode toolModes[] = {
                         BRUSH_RAISE, BRUSH_SMOOTH, BRUSH_FLATTEN,
                         BRUSH_SHARPEN, BRUSH_TERRACE,
                         BRUSH_EXPAND, BRUSH_CONTRACT,
+                        BRUSH_SHAPE, BRUSH_TAPER,
                     };
                     mode = toolModes[sculptTool];
                     brushGallery();
@@ -3590,6 +3952,22 @@ int main(int argc, char** argv)
                     }
                     if (shoreDirty)
                         apply_shoreline(gWaterline);
+                    ImGui::SeparatorText("Canvas");
+                    ImGui::Checkbox("Auto-Grow Map", &autoGrow);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip(
+                            "Sculpt into the map edge and the heightmap has "
+                            "nowhere to go -- the mesh gets sliced off flat.\n"
+                            "With this on, a stroke that reaches the rim "
+                            "widens the map by 30%% and tapers the new ground "
+                            "into the sea.\nYour island keeps its exact size "
+                            "and position; only the canvas around it grows, "
+                            "at the same polygon density.");
+                    ImGui::SameLine();
+                    if (ImGui::Button("Grow Now"))
+                        apply_canvas_grow(TER_HALF * 1.3f);
+                    ImGui::TextDisabled("map is %.0f x %.0f units",
+                                        TER_HALF * 2.0f, TER_HALF * 2.0f);
                     ImGui::SeparatorText("Outer Extension");
                     ImGui::Checkbox("Extend Land Outward", &extendOn);
                     if (extendOn) {
@@ -3626,6 +4004,110 @@ int main(int argc, char** argv)
                         ImGui::SameLine();
                         ImGui::Checkbox("Marker", &dummyMarker);
                     }
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("Shape")) {
+                    activeTab = 0;
+                    ImGui::TextWrapped(
+                        "Generates a whole island from a seed. Live: every "
+                        "slider rebuilds from the heights you had before "
+                        "the generator was switched on, so nothing is lost "
+                        "until you bake.");
+                    bool genDirty = false;
+                    if (ImGui::Checkbox("Generate Island", &gGen.on)) {
+                        if (gGenBase.size() != gHeights.size()) {
+                            push_undo();
+                            gGenBase = gHeights;
+                        }
+                        genDirty = true;
+                    }
+                    if (gGen.on) {
+                        ImGui::SeparatorText("Seed");
+                        genDirty |= ImGui::InputInt("Seed", &gGen.seed);
+                        if (ImGui::Button("Randomize")) {
+                            gGen.seed = (int)(SDL_GetTicks() * 2654435761u
+                                              % 100000u);
+                            genDirty = true;
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Next")) { gGen.seed++; genDirty = true; }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Prev")) { gGen.seed--; genDirty = true; }
+
+                        ImGui::SeparatorText("Footprint");
+                        genDirty |= ImGui::SliderFloat("Island Size",
+                                                       &gGen.size, 0.15f, 1.1f,
+                                                       "%.2f");
+                        genDirty |= ImGui::SliderFloat("Coast Falloff",
+                                                       &gGen.coast, 0.05f, 1.0f,
+                                                       "%.2f");
+                        genDirty |= ImGui::SliderFloat("Coast Wander",
+                                                       &gGen.lumps, 0.0f, 1.2f,
+                                                       "%.2f");
+                        genDirty |= ImGui::SliderFloat("Warp", &gGen.warp,
+                                                       0.0f, 1.5f, "%.2f");
+                        genDirty |= ImGui::SliderFloat("Sea Floor",
+                                                       &gGen.drop, 0.5f, 12.0f,
+                                                       "%.1f");
+
+                        ImGui::SeparatorText("Terrain");
+                        genDirty |= ImGui::SliderFloat("Height", &gGen.height,
+                                                       1.0f, 40.0f, "%.1f");
+                        genDirty |= ImGui::SliderFloat("Roughness",
+                                                       &gGen.rough, 0.0f, 1.5f,
+                                                       "%.2f");
+                        genDirty |= ImGui::SliderInt("Detail", &gGen.detail,
+                                                     1, 8);
+                        genDirty |= ImGui::SliderFloat("Feature Scale",
+                                                       &gGen.fscale, 0.5f,
+                                                       14.0f, "%.2f");
+                        genDirty |= ImGui::SliderFloat("Ridges", &gGen.ridge,
+                                                       0.0f, 1.0f, "%.2f");
+
+                        ImGui::SeparatorText("Summits");
+                        genDirty |= ImGui::SliderInt("Peaks", &gGen.peaks, 0, 6);
+                        genDirty |= ImGui::SliderFloat("Peak Height",
+                                                       &gGen.peakH, 0.0f, 2.0f,
+                                                       "%.2f");
+                        genDirty |= ImGui::SliderFloat("Peak Spread",
+                                                       &gGen.peakSpread, 0.0f,
+                                                       1.2f, "%.2f");
+
+                        ImGui::SeparatorText("Profile");
+                        genDirty |= ImGui::SliderFloat("Plateau",
+                                                       &gGen.plateau, 0.0f,
+                                                       1.0f, "%.2f");
+                        genDirty |= ImGui::SliderFloat("Terrace Step",
+                                                       &gGen.terr, 0.0f, 8.0f,
+                                                       "%.1f");
+                        genDirty |= ImGui::SliderFloat("Beach Width",
+                                                       &gGen.beach, 0.0f, 1.5f,
+                                                       "%.2f");
+
+                        ImGui::SeparatorText("Apply");
+                        genDirty |= ImGui::Checkbox("Layer Over Sculpt",
+                                                    &gGen.add);
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("On: adds the generated land on "
+                                              "top of what you already had.\n"
+                                              "Off: replaces the terrain "
+                                              "entirely.");
+                        if (ImGui::Button("Bake into Terrain")) {
+                            gGenBase.clear();   // keep the result, drop revert
+                            gGen.on = false;
+                            gShoreBase.clear();
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Revert")) {
+                            gGen.on = false;
+                            genDirty = true;
+                        }
+                        ImGui::TextDisabled("Bake, then use Shape Paint and\n"
+                                            "Taper to Sea in the Sculpt tab\n"
+                                            "to work the result by hand.");
+                    }
+                    if (genDirty)
+                        apply_generator(gWaterline);
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Paint")) {
