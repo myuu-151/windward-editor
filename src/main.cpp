@@ -47,14 +47,31 @@ static int   GRASS_N  = 320;         // grass instances per side
 static void resolutions_for(float half, int* grid, int* hn, int* mask,
                             int* grass)
 {
+    // Everything scales PROPORTIONALLY with the world so a texel, a quad
+    // and a blade cover the same ground at any map size. Stepped tiers
+    // used to fall behind -- a mask texel went from 0.09 units at 48u to
+    // 0.19 at 192u -- which is what made painted edges and the ground AO
+    // coarsen every time the map grew. Caps keep the biggest maps sane.
     const float mult = half / 24.0f;        // 1 at the original 48u map
-    int step = mult <= 1.01f ? 0 : mult <= 2.01f ? 1 : 2;
-    const int gridT[3]  = { 256, 384, 512 };
-    const int hnT[3]    = { 257, 385, 513 };
-    const int maskT[3]  = { 512, 768, 1024 };
-    const int grassT[3] = { 320, 460, 610 };
-    *grid = gridT[step]; *hn = hnT[step];
-    *mask = maskT[step]; *grass = grassT[step];
+    auto snap = [](float v, int step, int lo, int hi) {
+        int n = (int)(v / step + 0.5f) * step;
+        return SDL_clamp(n, lo, hi);
+    };
+    *grid  = snap(256.0f * mult, 64, 256, 1024);
+    *hn    = *grid + 1;
+    *mask  = snap(512.0f * mult, 128, 512, 2048);
+    *grass = snap(320.0f * mult, 32, 320, 800);
+}
+
+// AO map resolution for a world size: the ground-AO pass renders blade
+// footprints top-down and reads them back through mipmaps, so its texel
+// density has to track the world too -- otherwise a bigger map spreads
+// the same 1024 texels thinner and the AO radius (a mip level) covers
+// more ground, which reads as blurrier and darker contact shadows.
+static int ao_res_for(float half)
+{
+    int n = (int)(1024.0f * (half / 24.0f) / 256.0f + 0.5f) * 256;
+    return SDL_clamp(n, 1024, 4096);
 }
 
 // ---------------------------------------------------------------- shaders
@@ -1046,13 +1063,25 @@ static void resize_map(float newHalf)
             }
         return dst;
     };
+    // bilinear, not nearest: the masks hold continuous coverage values,
+    // and point-sampling them stair-steps every painted edge -- visibly,
+    // and worse each time the map is resized
     auto resample_u8 = [](const std::vector<Uint8>& src, int sn, int dn) {
         std::vector<Uint8> dst((size_t)dn * dn, 0);
         for (int j = 0; j < dn; j++)
             for (int i = 0; i < dn; i++) {
-                int si = SDL_clamp(i * sn / dn, 0, sn - 1);
-                int sj = SDL_clamp(j * sn / dn, 0, sn - 1);
-                dst[(size_t)j * dn + i] = src[(size_t)sj * sn + si];
+                float u = ((i + 0.5f) / dn) * sn - 0.5f;
+                float v = ((j + 0.5f) / dn) * sn - 0.5f;
+                int i0 = SDL_clamp((int)floorf(u), 0, sn - 1);
+                int j0 = SDL_clamp((int)floorf(v), 0, sn - 1);
+                int i1 = SDL_min(i0 + 1, sn - 1), j1 = SDL_min(j0 + 1, sn - 1);
+                float fu = SDL_clamp(u - i0, 0.0f, 1.0f);
+                float fv = SDL_clamp(v - j0, 0.0f, 1.0f);
+                float a = src[(size_t)j0 * sn + i0], b = src[(size_t)j0 * sn + i1];
+                float c = src[(size_t)j1 * sn + i0], d = src[(size_t)j1 * sn + i1];
+                float m = (a * (1 - fu) + b * fu) * (1 - fv) +
+                          (c * (1 - fu) + d * fu) * fv;
+                dst[(size_t)j * dn + i] = (Uint8)SDL_clamp(m + 0.5f, 0.0f, 255.0f);
             }
         return dst;
     };
@@ -1159,11 +1188,23 @@ static void grow_canvas(float newHalf, float seaLevel)
                 float z = -newHalf + (j + 0.5f) * cell;
                 if (fabsf(x) > oldHalf || fabsf(z) > oldHalf)
                     continue;
-                int si = SDL_clamp((int)((x + oldHalf) / (2.0f * oldHalf) *
-                                         MASK_N), 0, MASK_N - 1);
-                int sj = SDL_clamp((int)((z + oldHalf) / (2.0f * oldHalf) *
-                                         MASK_N), 0, MASK_N - 1);
-                dst[(size_t)j * nMask + i] = src[(size_t)sj * MASK_N + si];
+                // bilinear: point-sampling here stair-steps painted edges
+                float u = (x + oldHalf) / (2.0f * oldHalf) * MASK_N - 0.5f;
+                float v = (z + oldHalf) / (2.0f * oldHalf) * MASK_N - 0.5f;
+                int i0 = SDL_clamp((int)floorf(u), 0, MASK_N - 1);
+                int j0 = SDL_clamp((int)floorf(v), 0, MASK_N - 1);
+                int i1 = SDL_min(i0 + 1, MASK_N - 1);
+                int j1 = SDL_min(j0 + 1, MASK_N - 1);
+                float fu = SDL_clamp(u - i0, 0.0f, 1.0f);
+                float fv = SDL_clamp(v - j0, 0.0f, 1.0f);
+                float a = src[(size_t)j0 * MASK_N + i0];
+                float b = src[(size_t)j0 * MASK_N + i1];
+                float c = src[(size_t)j1 * MASK_N + i0];
+                float d = src[(size_t)j1 * MASK_N + i1];
+                float m = (a * (1 - fu) + b * fu) * (1 - fv) +
+                          (c * (1 - fu) + d * fu) * fv;
+                dst[(size_t)j * nMask + i] =
+                    (Uint8)SDL_clamp(m + 0.5f, 0.0f, 255.0f);
             }
         return dst;
     };
@@ -2654,17 +2695,25 @@ int main(int argc, char** argv)
     GLuint aoProg = make_program(GRASS_VS, AO_FS);
     make_stamps();
 
-    // live ground-AO map: blades rendered top-down, mipmapped for radius
-    const int AO_N = 1024;
+    // live ground-AO map: blades rendered top-down, mipmapped for radius.
+    // Its resolution follows the world size so a texel always covers the
+    // same ground -- the AO radius is a mip level, so a map that grew
+    // without this got wider, blurrier, darker contact shadows.
+    int AO_N = ao_res_for(TER_HALF);
     GLuint aoTex = 0, aoFbo = 0;
     glGenTextures(1, &aoTex);
-    glBindTexture(GL_TEXTURE_2D, aoTex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, AO_N, AO_N, 0, GL_RGBA,
-                 GL_UNSIGNED_BYTE, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    auto alloc_ao = [&]() {
+        glBindTexture(GL_TEXTURE_2D, aoTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, AO_N, AO_N, 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                        GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    };
+    alloc_ao();
     glGenFramebuffers(1, &aoFbo);
     glBindFramebuffer(GL_FRAMEBUFFER, aoFbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
@@ -2869,8 +2918,17 @@ int main(int argc, char** argv)
 
     // Resize the world and refresh every buffer that depends on its
     // size: the mesh, the grass field, and the shader-placed rings.
+    // keep the AO map's texel density matched to the world size
+    auto resync_ao = [&]() {
+        int want = ao_res_for(TER_HALF);
+        if (want == AO_N)
+            return;
+        AO_N = want;
+        alloc_ao();   // same texture object, so the FBO stays attached
+    };
     auto apply_map_resize = [&](float newHalf) {
         resize_map(newHalf);
+        resync_ao();
         rebuild_terrain_mesh();
         rebuild_grass_instances();
         glBindBuffer(GL_ARRAY_BUFFER, instVbo);
@@ -2885,6 +2943,7 @@ int main(int argc, char** argv)
         if (!gMapResized)
             return;
         gMapResized = false;
+        resync_ao();
         rebuild_terrain_mesh();
         rebuild_grass_instances();
         glBindBuffer(GL_ARRAY_BUFFER, instVbo);
@@ -2895,6 +2954,7 @@ int main(int argc, char** argv)
     // widen the canvas around the sculpt, keeping it exactly where it is
     auto apply_canvas_grow = [&](float newHalf) {
         grow_canvas(newHalf, gWaterline);
+        resync_ao();
         rebuild_terrain_mesh();
         rebuild_grass_instances();
         glBindBuffer(GL_ARRAY_BUFFER, instVbo);
