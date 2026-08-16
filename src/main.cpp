@@ -1112,6 +1112,15 @@ static void resize_map(float newHalf)
     std::vector<Uint8> m2 = resample_u8(gMask2, MASK_N, nMask);
     std::vector<Uint8> mk = resample_u8(gKill, MASK_N, nMask);
     gMask.swap(m1); gMask2.swap(m2); gKill.swap(mk);
+    // the generator's "paint before I ran" snapshot has to be resampled
+    // too: left at the old resolution it stops matching, the restore is
+    // skipped, and generated trails can never be painted back out
+    if (gGenMask.size() == (size_t)MASK_N * MASK_N) {
+        std::vector<Uint8> g1 = resample_u8(gGenMask, MASK_N, nMask);
+        std::vector<Uint8> g2 = resample_u8(gGenMask2, MASK_N, nMask);
+        std::vector<Uint8> g3 = resample_u8(gGenKill, MASK_N, nMask);
+        gGenMask.swap(g1); gGenMask2.swap(g2); gGenKill.swap(g3);
+    }
 
     // props sit in world units, so they move out with the island
     for (PropInst& pi : gProps) {
@@ -1222,11 +1231,21 @@ static void grow_canvas(float newHalf, float seaLevel)
     std::vector<Uint8> m1 = growMask(gMask, 0);
     std::vector<Uint8> m2 = growMask(gMask2, 0);
     std::vector<Uint8> mk = growMask(gKill, 255);   // no blades on new ground
+    std::vector<Uint8> g1, g2, g3;
+    const bool haveGenPaint = gGenMask.size() == (size_t)MASK_N * MASK_N;
+    if (haveGenPaint) {   // keep the generator's snapshot in step
+        g1 = growMask(gGenMask, 0);
+        g2 = growMask(gGenMask2, 0);
+        g3 = growMask(gGenKill, 255);
+    }
 
     gHeights.swap(nh);
     gShoreBase.swap(nShore);
     gGenBase.swap(nGen);
     gMask.swap(m1); gMask2.swap(m2); gKill.swap(mk);
+    if (haveGenPaint) {
+        gGenMask.swap(g1); gGenMask2.swap(g2); gGenKill.swap(g3);
+    }
     // props and the waterline are in world units and do not move
 
     TER_HALF = newHalf;
@@ -1384,10 +1403,10 @@ struct GenParams {
     float height = 8.9f;    // peak land height in world units
     float rough = 0.0f;     // terrain noise vs a smooth dome
     int   detail = 6;        // fbm octaves
-    float fscale = 1.62f;    // feature frequency
-    float ridge = 0.46f;      // billowy blobs .. sharp mountain spines
+    float fscale = 1.66f;    // feature frequency
+    float ridge = 0.43f;      // billowy blobs .. sharp mountain spines
     int   peaks = 4;         // seeded summits on top of the noise
-    float peakH = 0.76f;
+    float peakH = 0.78f;
     float peakSpread = 0.5f; // how far the summits sit from the centre
     float plateau = 0.75f;   // soft ceiling: mesa tops
     float terr = 0.9f;       // terrace step height, 0 = off
@@ -1945,9 +1964,17 @@ static void apply_generator(float seaLevel)
     // so regenerating has to start from clean ones or every drag of a
     // slider would stack another set of paths on the last
     auto restore_paint = [&]() {
-        if (gGenMask.size() == gMask.size()) gMask = gGenMask;
-        if (gGenMask2.size() == gMask2.size()) gMask2 = gGenMask2;
-        if (gGenKill.size() == gKill.size()) gKill = gGenKill;
+        if (gGenMask.size() != gMask.size()) {
+            // Nothing sane to put back -- rather than silently leaving
+            // generated trails painted on forever, re-snapshot here so
+            // the next regenerate has a clean base to restore.
+            SDL_Log("generator: paint snapshot was stale, re-taken");
+            gGenMask = gMask; gGenMask2 = gMask2; gGenKill = gKill;
+            return;
+        }
+        gMask = gGenMask;
+        gMask2 = gGenMask2;
+        gKill = gGenKill;
         gMaskDirty = gMask2Dirty = gKillDirty = true;
     };
     if (!gGen.on) {
