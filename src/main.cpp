@@ -1650,8 +1650,13 @@ static void road_carve(const std::vector<float>& rx,
         {
             // The ground as it actually is, lightly eased -- this is the
             // line a path would take if it simply followed the hillside.
+            // Smoothed hard: sampled raw, this is a staircase on terraced
+            // ground, and a road that follows a staircase carves each disc
+            // at a different height -- which shows up as vertical slivers
+            // torn down the cliffs. What a path should follow is the shape
+            // underneath the steps, not the steps.
             std::vector<float> ground = pth;
-            for (int pass = 0; pass < 2; pass++) {
+            for (int pass = 0; pass < 14; pass++) {
                 std::vector<float> t = ground;
                 for (int i = 1; i < steps; i++)
                     ground[i] = (t[i - 1] + 2.0f * t[i] + t[i + 1]) * 0.25f;
@@ -1678,9 +1683,16 @@ static void road_carve(const std::vector<float>& rx,
             // rolls with the land and only departs from it where the
             // climb genuinely has to be eased.
             float follow = SDL_clamp(g.pathFollow, 0.0f, 1.0f);
-            if (follow > 0.0f)
+            if (follow > 0.0f) {
                 for (int i = 0; i <= steps; i++)
                     pth[i] += (ground[i] - pth[i]) * follow;
+                // and take any residual steps back out of the result
+                for (int pass = 0; pass < 3; pass++) {
+                    std::vector<float> t = pth;
+                    for (int i = 1; i < steps; i++)
+                        pth[i] = (t[i - 1] + 2.0f * t[i] + t[i + 1]) * 0.25f;
+                }
+            }
         }
 
         for (int i = 0; i <= steps; i++) {
