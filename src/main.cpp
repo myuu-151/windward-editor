@@ -1029,6 +1029,7 @@ static std::vector<Snapshot> gUndoStack, gRedoStack;
 static std::vector<float> gShoreBase;   // heights before any shoreline
 static std::vector<float> gGenBase;     // heights before the generator
 static std::vector<Uint8> gGenMask, gGenMask2, gGenKill;   // and its paint
+static std::vector<PropInst> gGenProps;                    // and its props
 static void mark_all_dirty();
 static float cpu_vnoise(float x, float y);
 static void push_undo();
@@ -1520,6 +1521,8 @@ struct GenParams {
                              // the terrace treads exactly
     float pathFollow = 0.0f;    // 0 = hold one graded line, 1 = drape over
                                 // the ground as it is
+    bool  landmarks = true;     // caves, cairns and groves worth walking to
+    float landmarkDens = 1.0f;  // how much of it gets placed
     bool  roadSupport = false;  // build the hillside out to carry the road
     float roadSupportW = 6.0f;  // how far the buttress reaches
     bool  shorePath = false;  // run one trail down to a landing beach
@@ -2264,6 +2267,8 @@ static void gen_carve_paths(float seaLevel)
     gHeightsDirty = gMaskDirty = gMask2Dirty = gKillDirty = true;
 }
 
+static void gen_landmarks(float seaLevel);   // defined with the props
+
 // Rebuild the terrain from the generator. Non-destructive: always starts
 // from the snapshot taken when the generator was switched on.
 static void apply_generator(float seaLevel)
@@ -2308,6 +2313,7 @@ static void apply_generator(float seaLevel)
                          : land * mask + (seaLevel - gGen.drop) * (1.0f - mask);
         }
     gen_carve_paths(seaLevel);
+    gen_landmarks(seaLevel);
     gHeightsDirty = true;
 }
 
@@ -2860,6 +2866,165 @@ static bool load_prop(int idx)
     glBindVertexArray(0);
     m.loaded = true;
     return true;
+}
+
+// ---- landmarks
+// Places worth walking to, built from props where the terrain cannot do
+// the job: a heightmap holds one height per spot, so a cave mouth or an
+// overhang has to be geometry standing on the ground rather than shaped
+// out of it. The alcove is carved, the roof is propped.
+static int find_prop(const char* category, const char* nameHas, int nth)
+{
+    int seen = 0;
+    for (int i = 0; i < (int)gPropMeshes.size(); i++) {
+        const PropMesh& m = gPropMeshes[i];
+        if (m.category != category)
+            continue;
+        if (nameHas && m.label.find(nameHas) == std::string::npos)
+            continue;
+        if (seen++ == nth)
+            return i;
+    }
+    // fall back to anything in the category
+    for (int i = 0; i < (int)gPropMeshes.size(); i++)
+        if (gPropMeshes[i].category == category)
+            return i;
+    return -1;
+}
+
+// wantR is the radius the thing should END UP, in world units. The pack's
+// meshes vary enormously -- a cliff is tens of units across, a bush under
+// one -- so a fixed scale gives either pebbles or mountains.
+static void place_prop(int mesh, float x, float z, float yaw, float wantR,
+                       float sinkFrac)
+{
+    if (mesh < 0 || !load_prop(mesh))
+        return;
+    const PropMesh& m = gPropMeshes[mesh];
+    const float sc = wantR / SDL_max(0.05f, m.boundR);
+    gProps.push_back({ mesh, x,
+                       height_at(x, z) - m.boundH * sc * sinkFrac, z,
+                       yaw, sc });
+}
+
+static void gen_landmarks(float seaLevel)
+{
+    const GenParams& g = gGen;
+    if (!g.landmarks || gPropMeshes.empty())
+        return;
+    const float cell = 2.0f * TER_HALF / (HN - 1);
+    auto rnd = [&](int k) {
+        unsigned n = (unsigned)(g.seed * 2654435761u + k * 2246822519u);
+        n ^= n >> 13; n *= 2654435761u; n ^= n >> 16;
+        return (n & 0xFFFFFF) / 16777216.0f;
+    };
+
+    // --- the summit: a cairn of boulders, visible from the water
+    float bestH = -1e9f, sx = 0.0f, sz = 0.0f;
+    for (int j = 0; j < HN; j++)
+        for (int i = 0; i < HN; i++) {
+            float hh = gHeights[(size_t)j * HN + i];
+            if (hh > bestH) {
+                bestH = hh;
+                sx = -TER_HALF + i * cell;
+                sz = -TER_HALF + j * cell;
+            }
+        }
+    if (bestH > seaLevel + 1.0f) {
+        const int boulder = find_prop("Rocks", "BoulderClassic", 0);
+        for (int i = 0; i < 5; i++) {
+            const float a = 6.2831853f * i / 5 + rnd(i) * 0.8f;
+            const float r = 1.6f + rnd(i + 40) * 1.4f;
+            place_prop(boulder, sx + cosf(a) * r, sz + sinf(a) * r,
+                       rnd(i + 80) * 6.28f, 0.9f + rnd(i + 120) * 0.7f, 0.2f);
+        }
+    }
+
+    // --- a cave: find a steep face partway up and cut into it, then
+    // stand cliff props over the mouth so it reads as a roof rather than
+    // a dent. This is the bit a heightmap cannot do on its own.
+    {
+        float bx = 0.0f, bz = 0.0f, bestSlope = 0.0f;
+        for (int j = 2; j < HN - 2; j += 3)
+            for (int i = 2; i < HN - 2; i += 3) {
+                const float h = gHeights[(size_t)j * HN + i];
+                if (h < seaLevel + 2.0f || h > bestH * 0.75f)
+                    continue;      // want the flanks, not the peak or shore
+                const float dx = gHeights[(size_t)j * HN + i + 2] -
+                                 gHeights[(size_t)j * HN + i - 2];
+                const float dz = gHeights[(size_t)(j + 2) * HN + i] -
+                                 gHeights[(size_t)(j - 2) * HN + i];
+                const float sl = sqrtf(dx * dx + dz * dz);
+                if (sl > bestSlope) {
+                    bestSlope = sl;
+                    bx = -TER_HALF + i * cell;
+                    bz = -TER_HALF + j * cell;
+                }
+            }
+        if (bestSlope > 0.5f) {
+            const float mouthR = 3.4f;
+            const float floorH = height_at(bx, bz) - 0.4f;
+            // carve the alcove: a flat floor cut back into the slope
+            const int i0 = SDL_clamp((int)((bx - mouthR * 2.0f + TER_HALF) / cell), 0, HN - 1);
+            const int i1 = SDL_clamp((int)((bx + mouthR * 2.0f + TER_HALF) / cell) + 1, 0, HN - 1);
+            const int j0 = SDL_clamp((int)((bz - mouthR * 2.0f + TER_HALF) / cell), 0, HN - 1);
+            const int j1 = SDL_clamp((int)((bz + mouthR * 2.0f + TER_HALF) / cell) + 1, 0, HN - 1);
+            for (int j = j0; j <= j1; j++)
+                for (int i = i0; i <= i1; i++) {
+                    const float x = -TER_HALF + i * cell;
+                    const float z = -TER_HALF + j * cell;
+                    const float d = sqrtf((x - bx) * (x - bx) +
+                                          (z - bz) * (z - bz)) / mouthR;
+                    if (d >= 1.0f)
+                        continue;
+                    float w = 1.0f - SDL_clamp((d - 0.4f) / 0.6f, 0.0f, 1.0f);
+                    w = w * w * (3.0f - 2.0f * w);
+                    float& h = gHeights[(size_t)j * HN + i];
+                    if (h > floorH)
+                        h += (floorH - h) * w;
+                }
+            gHeightsDirty = true;
+            // the roof and jambs, in props
+            const int cliff = find_prop("Rocks", "CliffClassic", 0);
+            const int cliff2 = find_prop("Rocks", "CliffClassic", 2);
+            const int boulder = find_prop("Rocks", "Boulder", 1);
+            for (int i = 0; i < 7; i++) {
+                const float a = 3.14159f * (0.15f + 0.7f * i / 6.0f);
+                const float r = mouthR * 1.15f;
+                place_prop(i & 1 ? cliff : cliff2, bx + cosf(a) * r,
+                           bz + sinf(a) * r, a + 1.57f,
+                           mouthR * (0.55f + rnd(i + 200) * 0.25f), 0.35f);
+            }
+            for (int i = 0; i < 4; i++)
+                place_prop(boulder, bx + (rnd(i + 300) - 0.5f) * mouthR * 1.6f,
+                           bz + (rnd(i + 340) - 0.5f) * mouthR * 1.6f,
+                           rnd(i + 380) * 6.28f,
+                           0.7f + rnd(i + 420) * 0.6f, 0.15f);
+        }
+    }
+
+    // --- groves on the clearings, so a flat shelf reads as somewhere
+    for (size_t f = 0; f < gFlatCache.size(); f++) {
+        const GenFlat& fl = gFlatCache[f];
+        const float fx = fl.u * TER_HALF, fz = fl.v * TER_HALF;
+        const int n = (int)(6 * g.landmarkDens) + 2;
+        const int tree = find_prop("Trees", nullptr, (int)f);
+        const int bush = find_prop("Foliage", "Bush", 0);
+        for (int i = 0; i < n; i++) {
+            const float a = rnd((int)f * 100 + i) * 6.2831853f;
+            const float r = fl.r * TER_HALF * (0.35f + rnd(i + 500) * 0.8f);
+            const float x = SDL_clamp(fx + cosf(a) * r, -TER_HALF + 2.0f,
+                                      TER_HALF - 2.0f);
+            const float z = SDL_clamp(fz + sinf(a) * r, -TER_HALF + 2.0f,
+                                      TER_HALF - 2.0f);
+            if (height_at(x, z) < seaLevel + 0.8f)
+                continue;
+            place_prop(i % 3 == 0 ? bush : tree, x, z,
+                       rnd(i + 600) * 6.28f,
+                       (i % 3 == 0 ? 0.5f : 1.1f) + rnd(i + 640) * 0.5f,
+                       0.06f);
+        }
+    }
 }
 
 static void scan_props(const std::string& dir)
@@ -4301,6 +4466,22 @@ int main(int argc, char** argv)
             applySettingsIn();   // startup load must restore the sliders too
         }
         gMapResized = false;
+        // Nothing worth showing? Generate a level rather than opening on
+        // an empty plane: the island, its road, its cave and its groves,
+        // live on the sliders so it can be pushed around immediately.
+        if (!map_has_content()) {
+            gGenBase = gHeights;
+            gGenMask = gMask; gGenMask2 = gMask2; gGenKill = gKill;
+            gGenProps = gProps;
+            gGen.on = true;
+            apply_generator(gWaterline);
+            activeTab = 0;
+            camPos[0] = 0.0f;
+            camPos[1] = TER_HALF * 0.75f + gGen.height;
+            camPos[2] = TER_HALF * 1.5f;
+            pitch = -0.45f;
+            SDL_Log("opened on a generated island (seed %d)", gGen.seed);
+        }
     }
     SDL_Log("gen defaults in effect: seed %d size %.2f height %.1f terr %.2f "
             "detail %d fscale %.2f plateau %.2f", gGen.seed, gGen.size,
@@ -5209,7 +5390,7 @@ int main(int argc, char** argv)
                             push_undo();
                             gGenBase = gHeights;
                             gGenMask = gMask; gGenMask2 = gMask2;
-                            gGenKill = gKill;
+                            gGenKill = gKill; gGenProps = gProps;
                         }
                         genDirty = true;
                     }
@@ -5441,6 +5622,20 @@ int main(int argc, char** argv)
                                     "point. With Cling up it has to spiral "
                                     "the hill to get there.");
                         }
+                        ImGui::SeparatorText("Landmarks");
+                        genDirty |= ImGui::Checkbox("Places of Interest",
+                                                    &gGen.landmarks);
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip(
+                                "A cave cut into a steep flank and roofed "
+                                "with cliff props, a cairn on the summit, "
+                                "and groves on the clearings.\nThe cave "
+                                "roof is props because a heightmap holds "
+                                "one height per spot and cannot overhang.");
+                        if (gGen.landmarks)
+                            genDirty |= ImGui::SliderFloat(
+                                "Density", &gGen.landmarkDens, 0.2f, 3.0f,
+                                "%.2f");
                         ImGui::SeparatorText("Apply");
                         genDirty |= ImGui::Checkbox("Layer Over Sculpt",
                                                     &gGen.add);
@@ -5464,7 +5659,7 @@ int main(int argc, char** argv)
                         if (ImGui::Button("Bake into Terrain")) {
                             gGenBase.clear();   // keep the result, drop revert
                             gGenMask.clear(); gGenMask2.clear();
-                            gGenKill.clear();
+                            gGenKill.clear(); gGenProps.clear();
                             gGen.on = false;
                             gShoreBase.clear();
                         }
