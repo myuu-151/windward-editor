@@ -3047,7 +3047,8 @@ static void gen_landmarks(float seaLevel)
 // colour map can be unpacked and bound like any pack texture -- the props
 // then show up with their real materials rather than flat colours, and
 // the same Trunk/Leaves style overrides apply to them.
-static unsigned glb_texture(const cgltf_image* img, const std::string& dir)
+static unsigned glb_texture(const cgltf_image* img, const std::string& dir,
+                            bool* grayOut)
 {
     if (!img)
         return 0;
@@ -3081,6 +3082,20 @@ static unsigned glb_texture(const cgltf_image* img, const std::string& dir)
     stbi_uc* px = stbi_load_from_memory(bytes, (int)len, &w, &h, &ch, 4);
     if (!px)
         return 0;
+    // Is it a mask rather than a picture? A grayscale image is the pack's
+    // way of saying "tint me with the material gradient", and the shader
+    // needs telling -- otherwise it shows the mask itself, which is why
+    // the leaves came out grey while their Top and Bottom were right.
+    if (grayOut) {
+        bool gray = true;
+        const int step = SDL_max(1, (w * h) / 4096);
+        for (int i = 0; i < w * h && gray; i += step) {
+            const stbi_uc* q = px + (size_t)i * 4;
+            if (abs((int)q[0] - (int)q[1]) > 6 || abs((int)q[1] - (int)q[2]) > 6)
+                gray = false;
+        }
+        *grayOut = gray;
+    }
     unsigned tex = 0;
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
@@ -3207,6 +3222,7 @@ static bool import_glb(const std::string& path)
         }
     }
     std::unordered_map<const cgltf_image*, unsigned> texCache;
+    std::unordered_map<const cgltf_image*, bool> grayCache;
     std::string dir = path;
     {
         size_t a = dir.find_last_of("/\\");
@@ -3283,11 +3299,15 @@ static bool import_glb(const std::string& path)
                     const cgltf_image* im = pbr.base_color_texture.texture->image;
                     auto it = texCache.find(im);
                     if (it == texCache.end()) {
-                        const unsigned t = glb_texture(im, dir);
+                        bool gray = false;
+                        const unsigned t = glb_texture(im, dir, &gray);
                         texCache[im] = t;
+                        grayCache[im] = gray;
                         mat.tex = t;
+                        mat.grayMask = gray;
                     } else {
                         mat.tex = it->second;
+                        mat.grayMask = grayCache[im];
                     }
                     if (mat.tex) {
                         // the texture carries the colour; the factor is a
