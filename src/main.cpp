@@ -2125,6 +2125,24 @@ static int gWorldSel[2] = { 0, 0 };
 static int gTestCell[2] = { 1, 0 };   // built-in test island quadrant
 static bool gShowWater = true;
 
+// Every quadrant is a slot on disk under the editor, so islands persist
+// between sessions and switching cells always has somewhere to save to.
+static std::string slot_path(int cx, int cy)
+{
+    std::string dir = std::string(SDL_GetBasePath()) + "islands";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    char name[64];
+    SDL_snprintf(name, sizeof name, "/%c%d.wmap", 'A' + cx, cy + 1);
+    return dir + name;
+}
+
+// the editor's own chart, reloaded next launch
+static std::string editor_chart_path()
+{
+    return std::string(SDL_GetBasePath()) + "editor.wworld";
+}
+
 static void save_world(const char* path)
 {
     FILE* f = fopen(path, "wb");
@@ -2164,6 +2182,10 @@ static bool load_world(const char* path)
         else if (sscanf(line, "testisland %d %d", &x, &y) == 2) {
             gTestCell[0] = x;
             gTestCell[1] = y;
+        }
+        else if (sscanf(line, "editing %d %d", &x, &y) == 2) {
+            gWorldSel[0] = SDL_clamp(x, 0, WORLD_MAX - 1);
+            gWorldSel[1] = SDL_clamp(y, 0, WORLD_MAX - 1);
         }
         else if (sscanf(line, "cell %d %d %1023[^\n]", &x, &y, p) == 3)
             if (x >= 0 && x < WORLD_MAX && y >= 0 && y < WORLD_MAX)
@@ -2814,8 +2836,18 @@ int main(int argc, char** argv)
         pitch = -0.30f;
         camPos[0] = 4.5f; camPos[1] = 7.0f; camPos[2] = 33.0f;
     } else {
-        load_map(mapPath);
-        applySettingsIn();   // startup load must restore the sliders too
+        // the chart first: it says which quadrant we were working in and
+        // where each island lives, so the workspace comes back as left
+        if (load_world(editor_chart_path().c_str())) {
+            const std::string& cur = gWorldCells[gWorldSel[1]][gWorldSel[0]];
+            if (!cur.empty() && load_map(cur.c_str()))
+                applySettingsIn();
+            else if (load_map(mapPath))
+                applySettingsIn();
+        } else if (load_map(mapPath)) {
+            applySettingsIn();   // startup load must restore the sliders too
+        }
+        gMapResized = false;
     }
 
     SDL_Log("RMB=look WASD/QE=fly LMB=brush wheel=radius "
@@ -3807,6 +3839,9 @@ int main(int argc, char** argv)
                                 // switching quadrants saves what is open,
                                 // then opens that cell's island -- or a
                                 // clean slate when the cell is empty
+                                if (gWorldCells[gWorldSel[1]][gWorldSel[0]].empty())
+                                    gWorldCells[gWorldSel[1]][gWorldSel[0]] =
+                                        slot_path(gWorldSel[0], gWorldSel[1]);
                                 const std::string& cur =
                                     gWorldCells[gWorldSel[1]][gWorldSel[0]];
                                 if (!cur.empty() &&
@@ -3816,13 +3851,28 @@ int main(int argc, char** argv)
                                 }
                                 gWorldSel[0] = cx;
                                 gWorldSel[1] = cy;
-                                const std::string& nxt = gWorldCells[cy][cx];
+                                std::string nxt = gWorldCells[cy][cx];
+                                if (nxt.empty()) {
+                                    // an untouched quadrant still gets a
+                                    // file, so what you sculpt here is
+                                    // saved when you move on
+                                    nxt = slot_path(cx, cy);
+                                    if (std::filesystem::exists(nxt)) {
+                                        gWorldCells[cy][cx] = nxt;
+                                    } else {
+                                        new_map();
+                                        gWorldCells[cy][cx] = nxt;
+                                        syncSettingsOut();
+                                        save_map(nxt.c_str());
+                                        save_world(editor_chart_path().c_str());
+                                        nxt.clear();
+                                    }
+                                }
                                 if (!nxt.empty()) {
                                     if (load_map(nxt.c_str()))
                                         applySettingsIn();
-                                } else {
-                                    new_map();
                                 }
+                                save_world(editor_chart_path().c_str());
                                 rebuild_terrain_mesh();
                                 rebuild_grass_instances();
                                 glBindBuffer(GL_ARRAY_BUFFER, instVbo);
