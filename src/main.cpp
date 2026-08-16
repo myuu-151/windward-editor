@@ -975,9 +975,10 @@ enum BrushMode { BRUSH_RAISE, BRUSH_SMOOTH, BRUSH_FLATTEN,
                  BRUSH_EXPAND, BRUSH_CONTRACT,
                  BRUSH_SHAPE, BRUSH_TAPER,
                  BRUSH_DIRT, BRUSH_DIRT2, BRUSH_ERASEDIRT,
-                 BRUSH_GRASS, BRUSH_KILLGRASS };
+                 BRUSH_GRASS, BRUSH_KILLGRASS,
+                 BRUSH_ROAD };   // stroke-level: handled outside apply_brush
 
-static const float kBrushColors[14][3] = {
+static const float kBrushColors[15][3] = {
     { 1.0f, 0.85f, 0.3f },   // raise: yellow
     { 0.4f, 0.8f, 1.0f },    // smooth: blue
     { 0.9f, 0.5f, 0.9f },    // flatten: purple
@@ -992,13 +993,14 @@ static const float kBrushColors[14][3] = {
     { 0.35f, 0.8f, 0.35f },  // grass ground (erases dirt): deep green
     { 0.5f, 1.0f, 0.4f },    // grass blades: bright green
     { 0.9f, 0.35f, 0.3f },   // remove grass: red
+    { 0.95f, 0.9f, 0.6f },   // path: sand
 };
-static const char* kBrushNames[14] = { "Sculpt", "Smooth", "Flatten",
+static const char* kBrushNames[15] = { "Sculpt", "Smooth", "Flatten",
                                        "Sharpen", "Terrace",
                                        "Expand", "Contract",
                                        "Shape Paint", "Taper to Sea",
                                        "Path Dirt", "Soft Dirt", "Grass Ground",
-                                       "Grass Blades", "Remove Grass" };
+                                       "Grass Blades", "Remove Grass", "Path" };
 
 // terrace step height (world units), set from the panel
 static float gTerraceStep = 2.0f;
@@ -1580,6 +1582,167 @@ static float gen_land(float u, float v, float* maskOut)
     return land;
 }
 
+// ---- road carving
+// Cut and paint one polyline as a road: a flat tread at a grade-limited
+// height, constant-slope banks either side, and dirt laid along it. Used
+// both by the generator and by the Path brush, so a hand-drawn road is
+// built exactly like a generated one.
+static void road_carve(const std::vector<float>& rx,
+                       const std::vector<float>& rz, float wander)
+{
+    const GenParams& g = gGen;
+    if (rx.size() < 2 || gHeights.empty())
+        return;
+    const float cell = 2.0f * TER_HALF / (HN - 1);
+    const float mcell = 2.0f * TER_HALF / MASK_N;
+    const float halfW = SDL_max(0.4f, g.pathWidth * 0.5f);
+    const float so = g.seed * 0.7913f;
+        if (rx.size() < 2)
+            return;
+        // resample the route evenly so carving is uniform along it
+        std::vector<float> cum(rx.size(), 0.0f);
+        for (size_t k = 1; k < rx.size(); k++) {
+            float sx = rx[k] - rx[k - 1], sz = rz[k] - rz[k - 1];
+            cum[k] = cum[k - 1] + sqrtf(sx * sx + sz * sz);
+        }
+        float total = cum.back();
+        if (total < cell * 2.0f)
+            return;
+        int steps = SDL_max(8, (int)(total / (cell * 0.5f)));
+        std::vector<float> ptx(steps + 1), ptz(steps + 1), pth(steps + 1);
+        size_t seg = 0;
+        for (int i = 0; i <= steps; i++) {
+            float t = (float)i / steps;
+            float want = t * total;
+            while (seg + 2 < rx.size() && cum[seg + 1] < want)
+                seg++;
+            float segLen = SDL_max(0.0001f, cum[seg + 1] - cum[seg]);
+            float f = SDL_clamp((want - cum[seg]) / segLen, 0.0f, 1.0f);
+            float x = rx[seg] + (rx[seg + 1] - rx[seg]) * f;
+            float z = rz[seg] + (rz[seg + 1] - rz[seg]) * f;
+            // wander across the route, tapering to nothing at both ends
+            // so it still meets the clearings it was routed between
+            float tx = rx[seg + 1] - rx[seg], tz = rz[seg + 1] - rz[seg];
+            float tl = SDL_max(0.0001f, sqrtf(tx * tx + tz * tz));
+            float env = sinf(t * 3.14159f);
+            float w = ((cpu_vnoise(t * 3.1f + so, so * 2.0f) - 0.5f) * 2.0f +
+                       (cpu_vnoise(t * 7.7f - so, so) - 0.5f)) *
+                      wander * g.pathWidth * 1.2f * env;
+            x += (-tz / tl) * w;
+            z += (tx / tl) * w;
+            ptx[i] = SDL_clamp(x, -TER_HALF + cell, TER_HALF - cell);
+            ptz[i] = SDL_clamp(z, -TER_HALF + cell, TER_HALF - cell);
+            pth[i] = height_at(ptx[i], ptz[i]);
+        }
+        // Grade-limit the profile instead of smoothing it. Averaging a
+        // staircase gives a straight ramp, which then has to cut deep
+        // into every tread and pile fill over every riser -- that is what
+        // tore the scar across the terraces. Limiting slope from both
+        // ends keeps flat ground exactly flat and only lowers the trail
+        // where the climb is genuinely too steep, so a terraced hillside
+        // gets its treads left alone and a notch cut through each riser.
+        // Taking the minimum also means the trail never floats above the
+        // land: it cuts in, the way a worn path does.
+        {
+            float ds = total / steps;
+            float maxRise = SDL_max(0.02f, g.pathGrade) * ds;
+            for (int pass = 0; pass < 2; pass++) {
+                for (int i = 1; i <= steps; i++)
+                    pth[i] = SDL_min(pth[i], pth[i - 1] + maxRise);
+                for (int i = steps - 1; i >= 0; i--)
+                    pth[i] = SDL_min(pth[i], pth[i + 1] + maxRise);
+            }
+            // round the corners where cuts begin and end
+            for (int pass = 0; pass < 2; pass++) {
+                std::vector<float> t = pth;
+                for (int i = 1; i < steps; i++)
+                    pth[i] = (t[i - 1] + 2.0f * t[i] + t[i + 1]) * 0.25f;
+            }
+        }
+
+        for (int i = 0; i <= steps; i++) {
+            float cx = ptx[i], cz = ptz[i], ch = pth[i];
+            // Cut a bench, not a dip. A path reads as a path because it
+            // has a FLAT tread of constant width, with the ground cut
+            // away on the uphill side and filled on the downhill one --
+            // easing the terrain toward the trail height across the whole
+            // corridor just makes a soft trough that still rolls with the
+            // land. Tread is levelled outright; the shoulder blends back
+            // into whatever the hillside was doing.
+            // Banks are a constant SLOPE, not a constant width: a bank of
+            // fixed width has to go vertical when the cut is deep, which
+            // is why a deep crossing came out as a landslide scar. Away
+            // from the tread the ground may only differ from the trail by
+            // what the bank angle allows at that distance, so a shallow
+            // cut barely touches the hillside and a deep one opens a wide
+            // batter -- the shape earthworks actually make.
+            const float bank = SDL_max(0.15f, g.pathBank);
+            // How far the earthworks reach is set by how deep this bit of
+            // trail actually cuts: probe the ground just off each side of
+            // the tread and give the batter only the width it needs to
+            // meet grade. A fixed reach flattens the whole hillside even
+            // where the trail is already sitting on the surface.
+            int pi = SDL_max(0, i - 1), ni2 = SDL_min(steps, i + 1);
+            float tgx = ptx[ni2] - ptx[pi], tgz = ptz[ni2] - ptz[pi];
+            float tl2 = SDL_max(0.0001f, sqrtf(tgx * tgx + tgz * tgz));
+            float nx = -tgz / tl2, nz = tgx / tl2;
+            float e1 = height_at(SDL_clamp(cx + nx * halfW, -TER_HALF, TER_HALF),
+                                 SDL_clamp(cz + nz * halfW, -TER_HALF, TER_HALF));
+            float e2 = height_at(SDL_clamp(cx - nx * halfW, -TER_HALF, TER_HALF),
+                                 SDL_clamp(cz - nz * halfW, -TER_HALF, TER_HALF));
+            float depth = SDL_max(fabsf(e1 - ch), fabsf(e2 - ch));
+            const float reach = halfW + SDL_min(10.0f, depth / bank);
+            int i0 = SDL_clamp((int)((cx - reach + TER_HALF) / cell), 0, HN - 1);
+            int i1 = SDL_clamp((int)((cx + reach + TER_HALF) / cell) + 1, 0, HN - 1);
+            int j0 = SDL_clamp((int)((cz - reach + TER_HALF) / cell), 0, HN - 1);
+            int j1 = SDL_clamp((int)((cz + reach + TER_HALF) / cell) + 1, 0, HN - 1);
+            for (int j = j0; j <= j1; j++)
+                for (int ii = i0; ii <= i1; ii++) {
+                    float x = -TER_HALF + ii * cell, z = -TER_HALF + j * cell;
+                    float dd = sqrtf((x - cx) * (x - cx) + (z - cz) * (z - cz));
+                    if (dd >= reach)
+                        continue;
+                    float& h = gHeights[(size_t)j * HN + ii];
+                    float want;
+                    if (dd <= halfW) {
+                        want = ch;                       // the tread itself
+                    } else {
+                        float allow = (dd - halfW) * bank;
+                        want = SDL_clamp(h, ch - allow, ch + allow);
+                    }
+                    h += (want - h) * g.pathCut;
+                }
+            if (!g.pathPaint)
+                continue;
+            // lay the dirt, and clear blades off the tread
+            int mi0 = SDL_clamp((int)((cx - halfW + TER_HALF) / mcell), 0, MASK_N - 1);
+            int mi1 = SDL_clamp((int)((cx + halfW + TER_HALF) / mcell) + 1, 0, MASK_N - 1);
+            int mj0 = SDL_clamp((int)((cz - halfW + TER_HALF) / mcell), 0, MASK_N - 1);
+            int mj1 = SDL_clamp((int)((cz + halfW + TER_HALF) / mcell) + 1, 0, MASK_N - 1);
+            for (int j = mj0; j <= mj1; j++)
+                for (int ii = mi0; ii <= mi1; ii++) {
+                    float x = -TER_HALF + (ii + 0.5f) * mcell;
+                    float z = -TER_HALF + (j + 0.5f) * mcell;
+                    float d = sqrtf((x - cx) * (x - cx) + (z - cz) * (z - cz)) /
+                              halfW;
+                    if (d >= 1.0f)
+                        continue;
+                    // ragged edge, so the trail is not a clean stripe
+                    float e = 1.0f - d + (cpu_vnoise(x * 0.7f, z * 0.7f) - 0.5f) * 0.5f;
+                    if (e <= 0.05f)
+                        continue;
+                    Uint8 v = (Uint8)SDL_clamp(e * 320.0f, 0.0f, 255.0f);
+                    Uint8& m = (g.pathLayer == 0 ? gMask : gMask2)
+                                  [(size_t)j * MASK_N + ii];
+                    if (v > m) m = v;
+                    Uint8& k = gKill[(size_t)j * MASK_N + ii];
+                    if (v > k) k = v;   // 255 = no blades
+                }
+        }
+    
+    gHeightsDirty = gMaskDirty = gMask2Dirty = gKillDirty = true;
+}
+
 // ---- trails
 // Least-cost route between two points across the heightfield. A straight
 // line with noise on it reads as a stripe drawn over the terrain; a real
@@ -1804,151 +1967,9 @@ static void gen_carve_paths(float seaLevel)
     const float halfW = SDL_max(0.4f, g.pathWidth * 0.5f);
     const float so = g.seed * 0.7913f;
 
-    // cut and paint one polyline, wherever it came from
     auto carve_route = [&](const std::vector<float>& rx,
                            const std::vector<float>& rz) {
-        if (rx.size() < 2)
-            return;
-        // resample the route evenly so carving is uniform along it
-        std::vector<float> cum(rx.size(), 0.0f);
-        for (size_t k = 1; k < rx.size(); k++) {
-            float sx = rx[k] - rx[k - 1], sz = rz[k] - rz[k - 1];
-            cum[k] = cum[k - 1] + sqrtf(sx * sx + sz * sz);
-        }
-        float total = cum.back();
-        if (total < cell * 2.0f)
-            return;
-        int steps = SDL_max(8, (int)(total / (cell * 0.5f)));
-        std::vector<float> ptx(steps + 1), ptz(steps + 1), pth(steps + 1);
-        size_t seg = 0;
-        for (int i = 0; i <= steps; i++) {
-            float t = (float)i / steps;
-            float want = t * total;
-            while (seg + 2 < rx.size() && cum[seg + 1] < want)
-                seg++;
-            float segLen = SDL_max(0.0001f, cum[seg + 1] - cum[seg]);
-            float f = SDL_clamp((want - cum[seg]) / segLen, 0.0f, 1.0f);
-            float x = rx[seg] + (rx[seg + 1] - rx[seg]) * f;
-            float z = rz[seg] + (rz[seg + 1] - rz[seg]) * f;
-            // wander across the route, tapering to nothing at both ends
-            // so it still meets the clearings it was routed between
-            float tx = rx[seg + 1] - rx[seg], tz = rz[seg + 1] - rz[seg];
-            float tl = SDL_max(0.0001f, sqrtf(tx * tx + tz * tz));
-            float env = sinf(t * 3.14159f);
-            float w = ((cpu_vnoise(t * 3.1f + so, so * 2.0f) - 0.5f) * 2.0f +
-                       (cpu_vnoise(t * 7.7f - so, so) - 0.5f)) *
-                      g.pathWander * g.pathWidth * 1.2f * env;
-            x += (-tz / tl) * w;
-            z += (tx / tl) * w;
-            ptx[i] = SDL_clamp(x, -TER_HALF + cell, TER_HALF - cell);
-            ptz[i] = SDL_clamp(z, -TER_HALF + cell, TER_HALF - cell);
-            pth[i] = height_at(ptx[i], ptz[i]);
-        }
-        // Grade-limit the profile instead of smoothing it. Averaging a
-        // staircase gives a straight ramp, which then has to cut deep
-        // into every tread and pile fill over every riser -- that is what
-        // tore the scar across the terraces. Limiting slope from both
-        // ends keeps flat ground exactly flat and only lowers the trail
-        // where the climb is genuinely too steep, so a terraced hillside
-        // gets its treads left alone and a notch cut through each riser.
-        // Taking the minimum also means the trail never floats above the
-        // land: it cuts in, the way a worn path does.
-        {
-            float ds = total / steps;
-            float maxRise = SDL_max(0.02f, g.pathGrade) * ds;
-            for (int pass = 0; pass < 2; pass++) {
-                for (int i = 1; i <= steps; i++)
-                    pth[i] = SDL_min(pth[i], pth[i - 1] + maxRise);
-                for (int i = steps - 1; i >= 0; i--)
-                    pth[i] = SDL_min(pth[i], pth[i + 1] + maxRise);
-            }
-            // round the corners where cuts begin and end
-            for (int pass = 0; pass < 2; pass++) {
-                std::vector<float> t = pth;
-                for (int i = 1; i < steps; i++)
-                    pth[i] = (t[i - 1] + 2.0f * t[i] + t[i + 1]) * 0.25f;
-            }
-        }
-
-        for (int i = 0; i <= steps; i++) {
-            float cx = ptx[i], cz = ptz[i], ch = pth[i];
-            // Cut a bench, not a dip. A path reads as a path because it
-            // has a FLAT tread of constant width, with the ground cut
-            // away on the uphill side and filled on the downhill one --
-            // easing the terrain toward the trail height across the whole
-            // corridor just makes a soft trough that still rolls with the
-            // land. Tread is levelled outright; the shoulder blends back
-            // into whatever the hillside was doing.
-            // Banks are a constant SLOPE, not a constant width: a bank of
-            // fixed width has to go vertical when the cut is deep, which
-            // is why a deep crossing came out as a landslide scar. Away
-            // from the tread the ground may only differ from the trail by
-            // what the bank angle allows at that distance, so a shallow
-            // cut barely touches the hillside and a deep one opens a wide
-            // batter -- the shape earthworks actually make.
-            const float bank = SDL_max(0.15f, g.pathBank);
-            // How far the earthworks reach is set by how deep this bit of
-            // trail actually cuts: probe the ground just off each side of
-            // the tread and give the batter only the width it needs to
-            // meet grade. A fixed reach flattens the whole hillside even
-            // where the trail is already sitting on the surface.
-            int pi = SDL_max(0, i - 1), ni2 = SDL_min(steps, i + 1);
-            float tgx = ptx[ni2] - ptx[pi], tgz = ptz[ni2] - ptz[pi];
-            float tl2 = SDL_max(0.0001f, sqrtf(tgx * tgx + tgz * tgz));
-            float nx = -tgz / tl2, nz = tgx / tl2;
-            float e1 = height_at(SDL_clamp(cx + nx * halfW, -TER_HALF, TER_HALF),
-                                 SDL_clamp(cz + nz * halfW, -TER_HALF, TER_HALF));
-            float e2 = height_at(SDL_clamp(cx - nx * halfW, -TER_HALF, TER_HALF),
-                                 SDL_clamp(cz - nz * halfW, -TER_HALF, TER_HALF));
-            float depth = SDL_max(fabsf(e1 - ch), fabsf(e2 - ch));
-            const float reach = halfW + SDL_min(10.0f, depth / bank);
-            int i0 = SDL_clamp((int)((cx - reach + TER_HALF) / cell), 0, HN - 1);
-            int i1 = SDL_clamp((int)((cx + reach + TER_HALF) / cell) + 1, 0, HN - 1);
-            int j0 = SDL_clamp((int)((cz - reach + TER_HALF) / cell), 0, HN - 1);
-            int j1 = SDL_clamp((int)((cz + reach + TER_HALF) / cell) + 1, 0, HN - 1);
-            for (int j = j0; j <= j1; j++)
-                for (int ii = i0; ii <= i1; ii++) {
-                    float x = -TER_HALF + ii * cell, z = -TER_HALF + j * cell;
-                    float dd = sqrtf((x - cx) * (x - cx) + (z - cz) * (z - cz));
-                    if (dd >= reach)
-                        continue;
-                    float& h = gHeights[(size_t)j * HN + ii];
-                    float want;
-                    if (dd <= halfW) {
-                        want = ch;                       // the tread itself
-                    } else {
-                        float allow = (dd - halfW) * bank;
-                        want = SDL_clamp(h, ch - allow, ch + allow);
-                    }
-                    h += (want - h) * g.pathCut;
-                }
-            if (!g.pathPaint)
-                continue;
-            // lay the dirt, and clear blades off the tread
-            int mi0 = SDL_clamp((int)((cx - halfW + TER_HALF) / mcell), 0, MASK_N - 1);
-            int mi1 = SDL_clamp((int)((cx + halfW + TER_HALF) / mcell) + 1, 0, MASK_N - 1);
-            int mj0 = SDL_clamp((int)((cz - halfW + TER_HALF) / mcell), 0, MASK_N - 1);
-            int mj1 = SDL_clamp((int)((cz + halfW + TER_HALF) / mcell) + 1, 0, MASK_N - 1);
-            for (int j = mj0; j <= mj1; j++)
-                for (int ii = mi0; ii <= mi1; ii++) {
-                    float x = -TER_HALF + (ii + 0.5f) * mcell;
-                    float z = -TER_HALF + (j + 0.5f) * mcell;
-                    float d = sqrtf((x - cx) * (x - cx) + (z - cz) * (z - cz)) /
-                              halfW;
-                    if (d >= 1.0f)
-                        continue;
-                    // ragged edge, so the trail is not a clean stripe
-                    float e = 1.0f - d + (cpu_vnoise(x * 0.7f, z * 0.7f) - 0.5f) * 0.5f;
-                    if (e <= 0.05f)
-                        continue;
-                    Uint8 v = (Uint8)SDL_clamp(e * 320.0f, 0.0f, 255.0f);
-                    Uint8& m = (g.pathLayer == 0 ? gMask : gMask2)
-                                  [(size_t)j * MASK_N + ii];
-                    if (v > m) m = v;
-                    Uint8& k = gKill[(size_t)j * MASK_N + ii];
-                    if (v > k) k = v;   // 255 = no blades
-                }
-        }
+        road_carve(rx, rz, g.pathWander);
     };
 
     if (g.spiralRoad) {
@@ -2129,6 +2150,15 @@ static void apply_generator(float seaLevel)
     gen_carve_paths(seaLevel);
     gHeightsDirty = true;
 }
+
+// A hand-drawn road. The stroke is collected as a polyline and the whole
+// road is rebuilt from a snapshot every frame, so the grade limiting and
+// the banks are computed over the WHOLE path rather than compounding
+// piece by piece as the cursor moves -- dragging back over a stretch
+// re-cuts it rather than digging it deeper.
+static std::vector<float> gRoadX, gRoadZ;
+static std::vector<float> gRoadBaseH;
+static std::vector<Uint8> gRoadBaseM, gRoadBaseM2, gRoadBaseK;
 
 // flatten pulls terrain toward the height captured when the stroke began
 static float gFlattenTarget = 0.0f;
@@ -4257,7 +4287,35 @@ int main(int argc, char** argv)
                 hasHit = false;   // cursor over the panel: never paint through
             bool painting = hasHit && (mb & SDL_BUTTON_LMASK) && !shotPath;
             bool clickEdge = painting && !wasPainting;
-            if (painting && activeTab != 3) {
+            if (painting && activeTab != 3 && mode == BRUSH_ROAD) {
+                if (!wasPainting) {
+                    push_undo();
+                    gRoadX.clear();
+                    gRoadZ.clear();
+                    gRoadBaseH = gHeights;
+                    gRoadBaseM = gMask;
+                    gRoadBaseM2 = gMask2;
+                    gRoadBaseK = gKill;
+                }
+                float cellW = 2.0f * TER_HALF / (HN - 1);
+                bool added = gRoadX.empty();
+                if (!added) {
+                    float ddx = hit[0] - gRoadX.back();
+                    float ddz = hit[2] - gRoadZ.back();
+                    added = sqrtf(ddx * ddx + ddz * ddz) > cellW * 1.5f;
+                }
+                if (added) {
+                    gRoadX.push_back(hit[0]);
+                    gRoadZ.push_back(hit[2]);
+                    // rebuild from the snapshot so the road is cut once,
+                    // over the whole stroke, however slowly it is drawn
+                    gHeights = gRoadBaseH;
+                    gMask = gRoadBaseM;
+                    gMask2 = gRoadBaseM2;
+                    gKill = gRoadBaseK;
+                    road_carve(gRoadX, gRoadZ, 0.0f);
+                }
+            } else if (painting && activeTab != 3) {
                 if (!wasPainting)
                     push_undo();   // one undo step per stroke
                 // sculpt modifiers: Ctrl smooths, Alt flattens
@@ -4777,8 +4835,9 @@ int main(int argc, char** argv)
                                             "Smooth Height", "Flatten",
                                             "Sharpen Edges", "Terrace",
                                             "Expand Land", "Contract Land",
-                                            "Shape Paint", "Taper to Sea" };
-                    ImGui::Combo("##sculpttool", &sculptTool, tools, 9);
+                                            "Shape Paint", "Taper to Sea",
+                                            "Path" };
+                    ImGui::Combo("##sculpttool", &sculptTool, tools, 10);
                     static const char* helps[] = {
                         "Left click to raise.\nHold Shift and left click to "
                         "lower.\nHold Ctrl to smooth.\nHold Alt to flatten.",
@@ -4799,18 +4858,43 @@ int main(int argc, char** argv)
                         "Roll the land down into the water, smoothing as it "
                         "sinks, so edges end as beaches instead of cliffs.\n"
                         "Hold Shift to just smooth without lowering.",
+                        "Drag to lay a road: it cuts a flat tread at a "
+                        "walkable grade, banks the ground either side and "
+                        "paints the surface.\nUse it where the generated "
+                        "road cannot go -- a heightmap holds one height "
+                        "per spot, so a spiral cannot cross above itself.",
                     };
                     ImGui::TextWrapped("%s", helps[sculptTool]);
                     static const BrushMode toolModes[] = {
                         BRUSH_RAISE, BRUSH_SMOOTH, BRUSH_FLATTEN,
                         BRUSH_SHARPEN, BRUSH_TERRACE,
                         BRUSH_EXPAND, BRUSH_CONTRACT,
-                        BRUSH_SHAPE, BRUSH_TAPER,
+                        BRUSH_SHAPE, BRUSH_TAPER, BRUSH_ROAD,
                     };
                     mode = toolModes[sculptTool];
                     brushGallery();
-                    ImGui::SliderFloat("Strength", &brushStrength,
-                                       0.1f, 3.0f, "%.1f");
+                    if (mode == BRUSH_ROAD) {
+                        ImGui::SliderFloat("Road Width", &gGen.pathWidth,
+                                           0.6f, 8.0f, "%.1f");
+                        ImGui::SliderFloat("Road Cut", &gGen.pathCut,
+                                           0.0f, 1.0f, "%.2f");
+                        ImGui::SliderFloat("Bank Slope", &gGen.pathBank,
+                                           0.2f, 3.0f, "%.2f");
+                        ImGui::SliderFloat("Max Grade", &gGen.pathGrade,
+                                           0.05f, 1.2f, "%.2f");
+                        ImGui::Checkbox("Paint Surface", &gGen.pathPaint);
+                        if (gGen.pathPaint) {
+                            const char* surf[] = { "Path Dirt (brown)",
+                                                   "Soft Dirt (sand)" };
+                            ImGui::Combo("Surface", &gGen.pathLayer, surf, 2);
+                        }
+                        ImGui::TextDisabled("shares the generator's road\n"
+                                            "settings, so hand-drawn and\n"
+                                            "generated roads match");
+                    } else {
+                        ImGui::SliderFloat("Strength", &brushStrength,
+                                           0.1f, 3.0f, "%.1f");
+                    }
                     if (mode == BRUSH_TERRACE)
                         ImGui::SliderFloat("Step Height", &gTerraceStep,
                                            0.5f, 6.0f, "%.1f");
