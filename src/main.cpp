@@ -1433,6 +1433,8 @@ struct GenParams {
     float spiralInset = 0.0f;// how far back from each drop the road sits
     float spiralHug = 0.5f;  // 0 = cut straight through risers, 1 = follow
                              // the terrace treads exactly
+    float pathFollow = 0.65f;   // 0 = hold one graded line, 1 = drape over
+                                // the ground as it is
     bool  roadSupport = false;  // build the hillside out to carry the road
     float roadSupportW = 6.0f;  // how far the buttress reaches
     bool  shorePath = false;  // run one trail down to a landing beach
@@ -1646,6 +1648,14 @@ static void road_carve(const std::vector<float>& rx,
         // Taking the minimum also means the trail never floats above the
         // land: it cuts in, the way a worn path does.
         {
+            // The ground as it actually is, lightly eased -- this is the
+            // line a path would take if it simply followed the hillside.
+            std::vector<float> ground = pth;
+            for (int pass = 0; pass < 2; pass++) {
+                std::vector<float> t = ground;
+                for (int i = 1; i < steps; i++)
+                    ground[i] = (t[i - 1] + 2.0f * t[i] + t[i + 1]) * 0.25f;
+            }
             float ds = total / steps;
             float maxRise = SDL_max(0.02f, g.pathGrade) * ds;
             for (int pass = 0; pass < 2; pass++) {
@@ -1660,6 +1670,17 @@ static void road_carve(const std::vector<float>& rx,
                 for (int i = 1; i < steps; i++)
                     pth[i] = (t[i - 1] + 2.0f * t[i] + t[i + 1]) * 0.25f;
             }
+            // Grade limiting takes the minimum along the WHOLE path, so a
+            // single steep stretch drags everything after it down to one
+            // graded line -- on a hillside that reads as a flat pad cut
+            // into the slope rather than a path running across it. Follow
+            // Ground blends back toward the hillside itself, so the road
+            // rolls with the land and only departs from it where the
+            // climb genuinely has to be eased.
+            float follow = SDL_clamp(g.pathFollow, 0.0f, 1.0f);
+            if (follow > 0.0f)
+                for (int i = 0; i <= steps; i++)
+                    pth[i] += (ground[i] - pth[i]) * follow;
         }
 
         for (int i = 0; i <= steps; i++) {
@@ -3061,6 +3082,7 @@ struct TuneBlob {
     float genSpiralTurn = GenParams().spiralTurn;
     float genSpiralInset = GenParams().spiralInset;
     float genSpiralHug = GenParams().spiralHug;
+    float genPathFollow = GenParams().pathFollow;
     int   genRoadSupport = GenParams().roadSupport ? 1 : 0;
     float genRoadSupportW = GenParams().roadSupportW;
     float genFlatSize = GenParams().flatSize;
@@ -4049,6 +4071,7 @@ int main(int argc, char** argv)
         gTune.genSpiralTurn = gGen.spiralTurn;
         gTune.genSpiralInset = gGen.spiralInset;
         gTune.genSpiralHug = gGen.spiralHug;
+        gTune.genPathFollow = gGen.pathFollow;
         gTune.genRoadSupport = gGen.roadSupport ? 1 : 0;
         gTune.genRoadSupportW = gGen.roadSupportW;
         memset(gTune.propSelId, 0, sizeof gTune.propSelId);
@@ -4916,6 +4939,14 @@ int main(int argc, char** argv)
                                            0.2f, 3.0f, "%.2f");
                         ImGui::SliderFloat("Max Grade", &gGen.pathGrade,
                                            0.05f, 1.2f, "%.2f");
+                        ImGui::SliderFloat("Follow Ground", &gGen.pathFollow,
+                                           0.0f, 1.0f, "%.2f");
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip(
+                                "1: the road rolls with the hillside.\n"
+                                "0: it holds one graded line and cuts the "
+                                "ground to meet it, which on a slope comes "
+                                "out as a flat pad.");
                         ImGui::Checkbox("Paint Surface", &gGen.pathPaint);
                         if (gGen.pathPaint) {
                             const char* surf[] = { "Path Dirt (brown)",
@@ -5172,6 +5203,9 @@ int main(int argc, char** argv)
                                     0.0f, 5.0f, "%.2f");
                                 genDirty |= ImGui::SliderFloat(
                                     "Road Hugs Terraces", &gGen.spiralHug,
+                                    0.0f, 1.0f, "%.2f");
+                                genDirty |= ImGui::SliderFloat(
+                                    "Follow Ground", &gGen.pathFollow,
                                     0.0f, 1.0f, "%.2f");
                                 genDirty |= ImGui::Checkbox(
                                     "Build Hillside for Road",
