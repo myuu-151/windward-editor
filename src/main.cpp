@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <queue>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -1401,6 +1402,7 @@ struct GenParams {
     float pathWidth = 2.2f;  // world units
     float pathWander = 0.5f;
     float pathCut = 0.85f;   // how firmly a trail levels the ground it crosses
+    float pathGrade = 0.30f; // steepest climb a trail will accept
     bool  pathPaint = true;  // lay dirt (and clear grass) along the trails
     bool  shorePath = true;  // run one trail down to a landing beach
     bool  add = false;       // layer over the existing sculpt
@@ -1551,6 +1553,98 @@ static float gen_land(float u, float v, float* maskOut)
 }
 
 // ---- trails
+// Least-cost route between two points across the heightfield. A straight
+// line with noise on it reads as a stripe drawn over the terrain; a real
+// trail is the CHEAPEST way across it, so climbing is priced against the
+// grade it costs. Below the grade limit slope is nearly free, past it the
+// price climbs steeply -- which is what makes routes hug contours and
+// switchback up a hillside instead of charging over the top.
+static bool gen_route(float ax, float az, float bx, float bz, float seaLevel,
+                      std::vector<float>& outX, std::vector<float>& outZ)
+{
+    const int N = SDL_clamp(HN / 4, 48, 160);
+    const float span = 2.0f * TER_HALF;
+    auto wpos = [&](int i) { return -TER_HALF + span * i / (N - 1); };
+    auto idx = [&](int i, int j) { return (size_t)j * N + i; };
+    auto toGrid = [&](float w) {
+        return SDL_clamp((int)((w + TER_HALF) / span * (N - 1) + 0.5f),
+                         0, N - 1);
+    };
+    std::vector<float> h((size_t)N * N);
+    for (int j = 0; j < N; j++)
+        for (int i = 0; i < N; i++)
+            h[idx(i, j)] = height_at(wpos(i), wpos(j));
+
+    const float cell = span / (N - 1);
+    const float maxG = SDL_max(0.02f, gGen.pathGrade);
+    std::vector<float> dist((size_t)N * N, 1e30f);
+    std::vector<int> prev((size_t)N * N, -1);
+    int si = toGrid(ax), sj = toGrid(az), ti = toGrid(bx), tj = toGrid(bz);
+    typedef std::pair<float, int> QE;
+    std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
+    dist[idx(si, sj)] = 0.0f;
+    pq.push({ 0.0f, (int)idx(si, sj) });
+    const int goal = (int)idx(ti, tj);
+    while (!pq.empty()) {
+        QE top = pq.top();
+        pq.pop();
+        int cur = top.second;
+        if (top.first > dist[cur] + 0.0001f)
+            continue;
+        if (cur == goal)
+            break;
+        int ci = cur % N, cj = cur / N;
+        for (int dj = -1; dj <= 1; dj++)
+            for (int di = -1; di <= 1; di++) {
+                if (!di && !dj)
+                    continue;
+                int ni = ci + di, nj = cj + dj;
+                if (ni < 0 || nj < 0 || ni >= N || nj >= N)
+                    continue;
+                float d = cell * ((di && dj) ? 1.4142f : 1.0f);
+                float dh = h[idx(ni, nj)] - h[idx(ci, cj)];
+                float grade = fabsf(dh) / d;
+                float c = d;
+                float over = grade / maxG;
+                c *= 1.0f + over * over * 1.5f;
+                if (over > 1.0f)
+                    c *= 1.0f + (over - 1.0f) * 12.0f;   // effectively a wall
+                if (h[idx(ni, nj)] < seaLevel + 0.2f)
+                    c += span * 4.0f;                    // stay on land
+                size_t nk = idx(ni, nj);
+                if (dist[cur] + c < dist[nk]) {
+                    dist[nk] = dist[cur] + c;
+                    prev[nk] = cur;
+                    pq.push({ dist[nk], (int)nk });
+                }
+            }
+    }
+    if (prev[goal] < 0 && goal != (int)idx(si, sj))
+        return false;
+    std::vector<int> rev;
+    for (int c = goal; c >= 0; c = prev[c]) {
+        rev.push_back(c);
+        if (c == (int)idx(si, sj))
+            break;
+    }
+    if (rev.size() < 2)
+        return false;
+    outX.clear();
+    outZ.clear();
+    for (size_t k = rev.size(); k-- > 0;) {
+        outX.push_back(wpos(rev[k] % N));
+        outZ.push_back(wpos(rev[k] / N));
+    }
+    // the route came off an 8-direction grid, so it staircases: relax it
+    // into a curve the way a walked trail would wear
+    for (int pass = 0; pass < 6; pass++)
+        for (size_t k = 1; k + 1 < outX.size(); k++) {
+            outX[k] = (outX[k - 1] + 2.0f * outX[k] + outX[k + 1]) * 0.25f;
+            outZ[k] = (outZ[k - 1] + 2.0f * outZ[k] + outZ[k + 1]) * 0.25f;
+        }
+    return true;
+}
+
 // A path is routed between the clearings, then down to a landing beach.
 // Rather than cutting a straight ramp between two heights -- which gouges
 // a trench across anything in the way -- it samples the ground it crosses
@@ -1601,28 +1695,54 @@ static void gen_carve_paths(float seaLevel)
         float ax = nodes[n].x, az = nodes[n].z;
         float bx = nodes[n + 1].x, bz = nodes[n + 1].z;
         float dx = bx - ax, dz = bz - az;
-        float len = sqrtf(dx * dx + dz * dz);
-        if (len < cell * 2.0f)
+        if (sqrtf(dx * dx + dz * dz) < cell * 2.0f)
             continue;
-        int steps = SDL_max(8, (int)(len / (cell * 0.5f)));
-        float px = -dz / len, pz = dx / len;   // lateral
-
+        // route it across the terrain; a straight line is only the
+        // fallback for when no walkable way exists at all
+        std::vector<float> rx, rz;
+        if (!gen_route(ax, az, bx, bz, seaLevel, rx, rz)) {
+            rx = { ax, bx };
+            rz = { az, bz };
+        }
+        // resample the route evenly so carving is uniform along it
+        std::vector<float> cum(rx.size(), 0.0f);
+        for (size_t k = 1; k < rx.size(); k++) {
+            float sx = rx[k] - rx[k - 1], sz = rz[k] - rz[k - 1];
+            cum[k] = cum[k - 1] + sqrtf(sx * sx + sz * sz);
+        }
+        float total = cum.back();
+        if (total < cell * 2.0f)
+            continue;
+        int steps = SDL_max(8, (int)(total / (cell * 0.5f)));
         std::vector<float> ptx(steps + 1), ptz(steps + 1), pth(steps + 1);
+        size_t seg = 0;
         for (int i = 0; i <= steps; i++) {
             float t = (float)i / steps;
-            // wander, tapering to zero at both ends so it still arrives
+            float want = t * total;
+            while (seg + 2 < rx.size() && cum[seg + 1] < want)
+                seg++;
+            float segLen = SDL_max(0.0001f, cum[seg + 1] - cum[seg]);
+            float f = SDL_clamp((want - cum[seg]) / segLen, 0.0f, 1.0f);
+            float x = rx[seg] + (rx[seg + 1] - rx[seg]) * f;
+            float z = rz[seg] + (rz[seg + 1] - rz[seg]) * f;
+            // wander across the route, tapering to nothing at both ends
+            // so it still meets the clearings it was routed between
+            float tx = rx[seg + 1] - rx[seg], tz = rz[seg + 1] - rz[seg];
+            float tl = SDL_max(0.0001f, sqrtf(tx * tx + tz * tz));
             float env = sinf(t * 3.14159f);
             float w = ((cpu_vnoise(t * 3.1f + so, so * 2.0f) - 0.5f) * 2.0f +
                        (cpu_vnoise(t * 7.7f - so, so) - 0.5f)) *
-                      g.pathWander * len * 0.18f * env;
-            float x = ax + dx * t + px * w;
-            float z = az + dz * t + pz * w;
+                      g.pathWander * g.pathWidth * 1.2f * env;
+            x += (-tz / tl) * w;
+            z += (tx / tl) * w;
             ptx[i] = SDL_clamp(x, -TER_HALF + cell, TER_HALF - cell);
             ptz[i] = SDL_clamp(z, -TER_HALF + cell, TER_HALF - cell);
             pth[i] = height_at(ptx[i], ptz[i]);
         }
-        // smooth the profile into a walkable grade
-        for (int pass = 0; pass < 24; pass++) {
+        // ease the profile into a walkable grade. The route already keeps
+        // to gentle ground, so this only takes the steps out rather than
+        // dragging the trail away from the land it was routed along.
+        for (int pass = 0; pass < 8; pass++) {
             std::vector<float> t = pth;
             for (int i = 1; i < steps; i++)
                 pth[i] = (t[i - 1] + 2.0f * t[i] + t[i + 1]) * 0.25f;
@@ -2561,6 +2681,7 @@ struct TuneBlob {
     int   genFlats = 3, genPaths = 1, genPathPaint = 1, genShorePath = 1;
     float genFlatSize = 0.20f, genFlatFlat = 0.9f;
     float genPathWidth = 2.2f, genPathWander = 0.5f, genPathCut = 0.85f;
+    float genPathGrade = 0.30f;
 };
 static TuneBlob gTune;
 static bool gLoadedTune = false;
@@ -3516,6 +3637,7 @@ int main(int argc, char** argv)
         gTune.genPathWidth = gGen.pathWidth;
         gTune.genPathWander = gGen.pathWander;
         gTune.genPathCut = gGen.pathCut;
+        gTune.genPathGrade = gGen.pathGrade;
         memset(gTune.propSelId, 0, sizeof gTune.propSelId);
         if (propSel >= 0 && propSel < (int)gPropMeshes.size())
             SDL_strlcpy(gTune.propSelId,
@@ -3588,6 +3710,7 @@ int main(int argc, char** argv)
             gGen.pathWidth = gTune.genPathWidth;
             gGen.pathWander = gTune.genPathWander;
             gGen.pathCut = gTune.genPathCut;
+            gGen.pathGrade = gTune.genPathGrade;
             if (gTune.propSelId[0]) {
                 for (int mi = 0; mi < (int)gPropMeshes.size(); mi++)
                     if (mesh_id(gPropMeshes[mi]) == gTune.propSelId) {
@@ -4554,6 +4677,15 @@ int main(int argc, char** argv)
                             genDirty |= ImGui::SliderFloat("Trail Cut",
                                                            &gGen.pathCut, 0.0f,
                                                            1.0f, "%.2f");
+                            genDirty |= ImGui::SliderFloat("Max Grade",
+                                                           &gGen.pathGrade,
+                                                           0.05f, 1.2f, "%.2f");
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip(
+                                    "Steepest climb a trail will accept.\n"
+                                    "Lower it and routes stop charging over "
+                                    "hills -- they hug the contours and "
+                                    "switchback up instead.");
                             genDirty |= ImGui::Checkbox("Paint Dirt",
                                                         &gGen.pathPaint);
                             genDirty |= ImGui::Checkbox("Trail to Beach",
