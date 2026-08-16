@@ -32,6 +32,7 @@
 #include <queue>
 #include <string>
 #include <unordered_map>
+#include <array>
 #include <vector>
 #define CGLTF_IMPLEMENTATION
 #include "cgltf.h"
@@ -3120,13 +3121,57 @@ static bool import_blend(const std::string& path)
         SDL_Log("import: no blender.exe found -- set BLENDER to its path");
         return false;
     }
-    const std::string out = std::string(SDL_GetBasePath()) + "blend_import.glb";
+    const std::string base = SDL_GetBasePath();
+    const std::string out = base + "blend_import.glb";
+    const std::string script = base + "blend_import.py";
+    // Written to a file rather than passed as --python-expr: the quoting
+    // does not survive a command line, and this needs real code.
+    //
+    // glTF can only carry a Principled BSDF's base colour and a texture
+    // linked straight into it. These materials run the leaf texture
+    // through a Multiply against a height Color Ramp, and an exporter
+    // that cannot trace that link exports NO texture at all -- which is
+    // why the leaves arrived white. So before exporting: find the image
+    // feeding the graph and wire it directly to Base Color, and write the
+    // ramp's two ends out beside the glb as the gradient the editor's
+    // materials already understand.
+    {
+        FILE* sf = fopen(script.c_str(), "wb");
+        if (!sf) {
+            SDL_Log("import: could not write %s", script.c_str());
+            return false;
+        }
+        fprintf(sf,
+            "import bpy, os\n"
+            "grad = []\n"
+            "for m in bpy.data.materials:\n"
+            "    if not m.use_nodes or not m.node_tree: continue\n"
+            "    nt = m.node_tree\n"
+            "    bsdf = next((n for n in nt.nodes if n.type=='BSDF_PRINCIPLED'), None)\n"
+            "    img = next((n for n in nt.nodes if n.type=='TEX_IMAGE' and n.image), None)\n"
+            "    if bsdf and img:\n"
+            "        bc = bsdf.inputs['Base Color']\n"
+            "        for l in list(bc.links): nt.links.remove(l)\n"
+            "        nt.links.new(img.outputs['Color'], bc)\n"
+            "        al = bsdf.inputs.get('Alpha')\n"
+            "        if al is not None and 'Alpha' in img.outputs:\n"
+            "            for l in list(al.links): nt.links.remove(l)\n"
+            "            nt.links.new(img.outputs['Alpha'], al)\n"
+            "    ramp = next((n for n in nt.nodes if n.type=='VALTORGB'), None)\n"
+            "    if ramp:\n"
+            "        e = ramp.color_ramp.elements\n"
+            "        a = e[0].color; b = e[len(e)-1].color\n"
+            "        grad.append('%%s %%f %%f %%f %%f %%f %%f' %% (m.name,\n"
+            "            b[0],b[1],b[2], a[0],a[1],a[2]))\n"
+            "bpy.ops.export_scene.gltf(filepath=r'%s', export_format='GLB',\n"
+            "    export_apply=True, export_materials='EXPORT')\n"
+            "open(r'%s','w').write('\\n'.join(grad))\n",
+            out.c_str(), (out + ".grad").c_str());
+        fclose(sf);
+    }
     char cmd[2048];
-    SDL_snprintf(cmd, sizeof cmd,
-                 "\"\"%s\" -b \"%s\" --python-expr \"import bpy;"
-                 "bpy.ops.export_scene.gltf(filepath=r'%s',"
-                 "export_format='GLB',export_apply=True)\"\"",
-                 blender.c_str(), path.c_str(), out.c_str());
+    SDL_snprintf(cmd, sizeof cmd, "\"\"%s\" -b \"%s\" --python \"%s\"\"",
+                 blender.c_str(), path.c_str(), script.c_str());
     SDL_Log("import: converting %s via blender...", path.c_str());
     const int rc = system(cmd);
     if (rc != 0 || !std::filesystem::exists(out)) {
@@ -3147,6 +3192,20 @@ static bool import_glb(const std::string& path)
         return false;
     }
 
+    // top/bottom colours Blender pulled out of each Color Ramp, if the
+    // model came in through the .blend path
+    std::unordered_map<std::string, std::array<float, 6>> grads;
+    {
+        FILE* gf = fopen((path + ".grad").c_str(), "rb");
+        if (gf) {
+            char nm[256];
+            float t0, t1, t2, b0, b1, b2;
+            while (fscanf(gf, "%255s %f %f %f %f %f %f", nm, &t0, &t1, &t2,
+                          &b0, &b1, &b2) == 7)
+                grads[nm] = { t0, t1, t2, b0, b1, b2 };
+            fclose(gf);
+        }
+    }
     std::unordered_map<const cgltf_image*, unsigned> texCache;
     std::string dir = path;
     {
@@ -3212,6 +3271,14 @@ static bool import_glb(const std::string& path)
                 }
                 if (pr.material->name)
                     mat.name = pr.material->name;
+                auto gi = grads.find(mat.name);
+                if (gi != grads.end()) {
+                    // the ramp IS the gradient these materials paint with
+                    for (int k = 0; k < 3; k++) {
+                        mat.kd[k] = gi->second[k];
+                        mat.ka[k] = gi->second[3 + k];
+                    }
+                }
                 if (pbr.base_color_texture.texture) {
                     const cgltf_image* im = pbr.base_color_texture.texture->image;
                     auto it = texCache.find(im);
