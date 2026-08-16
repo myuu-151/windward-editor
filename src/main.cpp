@@ -1425,6 +1425,7 @@ struct GenParams {
     float pathBank = 3.0f;   // slope of the cut/fill banks beside the tread
     float pathCling = 1.0f;  // 0 = cut across the terrain, 1 = wind around it
     bool  pathPaint = true;  // lay dirt (and clear grass) along the trails
+    int   pathLayer = 1;     // 0 = path dirt (brown), 1 = soft dirt (sand)
     bool  shorePath = true;  // run one trail down to a landing beach
     bool  summitPath = true; // and one up to the island's high point
     bool  add = false;       // layer over the existing sculpt
@@ -1944,14 +1945,15 @@ static void gen_carve_paths(float seaLevel)
                     if (e <= 0.05f)
                         continue;
                     Uint8 v = (Uint8)SDL_clamp(e * 320.0f, 0.0f, 255.0f);
-                    Uint8& m = gMask[(size_t)j * MASK_N + ii];
+                    Uint8& m = (g.pathLayer == 0 ? gMask : gMask2)
+                                  [(size_t)j * MASK_N + ii];
                     if (v > m) m = v;
                     Uint8& k = gKill[(size_t)j * MASK_N + ii];
                     if (v > k) k = v;   // 255 = no blades
                 }
         }
     }
-    gHeightsDirty = gMaskDirty = gKillDirty = true;
+    gHeightsDirty = gMaskDirty = gMask2Dirty = gKillDirty = true;
 }
 
 // Rebuild the terrain from the generator. Non-destructive: always starts
@@ -2844,7 +2846,7 @@ struct TuneBlob {
     int   autoGrow = 1;
     int   trimSkirt = 0;
     int   genFlats = 3, genPaths = 1, genPathPaint = 1, genShorePath = 1;
-    int   genSummitPath = 1;
+    int   genSummitPath = 1, genPathLayer = 1;
     float genFlatSize = 0.20f, genFlatFlat = 0.9f;
     float genPathWidth = 2.2f, genPathWander = 0.5f, genPathCut = 0.85f;
     float genPathGrade = 0.30f, genPathBank = 0.9f, genPathCling = 1.0f;
@@ -3817,6 +3819,7 @@ int main(int argc, char** argv)
         gTune.genPathBank = gGen.pathBank;
         gTune.genPathCling = gGen.pathCling;
         gTune.genSummitPath = gGen.summitPath ? 1 : 0;
+        gTune.genPathLayer = gGen.pathLayer;
         memset(gTune.propSelId, 0, sizeof gTune.propSelId);
         if (propSel >= 0 && propSel < (int)gPropMeshes.size())
             SDL_strlcpy(gTune.propSelId,
@@ -3893,6 +3896,7 @@ int main(int argc, char** argv)
             gGen.pathBank = gTune.genPathBank;
             gGen.pathCling = gTune.genPathCling;
             gGen.summitPath = gTune.genSummitPath != 0;
+            gGen.pathLayer = SDL_clamp(gTune.genPathLayer, 0, 1);
             if (gTune.propSelId[0]) {
                 for (int mi = 0; mi < (int)gPropMeshes.size(); mi++)
                     if (mesh_id(gPropMeshes[mi]) == gTune.propSelId) {
@@ -4897,6 +4901,13 @@ int main(int argc, char** argv)
                                     "switchback up instead.");
                             genDirty |= ImGui::Checkbox("Paint Dirt",
                                                         &gGen.pathPaint);
+                            if (gGen.pathPaint) {
+                                const char* surf[] = { "Path Dirt (brown)",
+                                                       "Soft Dirt (sand)" };
+                                genDirty |= ImGui::Combo("Surface",
+                                                         &gGen.pathLayer,
+                                                         surf, 2);
+                            }
                             genDirty |= ImGui::Checkbox("Trail to Beach",
                                                         &gGen.shorePath);
                             genDirty |= ImGui::Checkbox("Trail to Summit",
