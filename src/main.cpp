@@ -5041,6 +5041,21 @@ int main(int argc, char** argv)
             float len = sqrtf(rd[0] * rd[0] + rd[1] * rd[1] + rd[2] * rd[2]);
             rd[0] /= len; rd[1] /= len; rd[2] /= len;
             hasHit = ray_terrain(camPos, rd, hit);
+            if (!hasHit && !gShowGround && rd[1] < -0.0001f) {
+                // With the ground gone there is nothing to raycast, so the
+                // brush would have nowhere to land and props could not be
+                // placed at all. Fall back to the waterline: it is the one
+                // reference a quadrant always has, and it is where a
+                // prop-built level sits anyway.
+                const float t = (gWaterline - camPos[1]) / rd[1];
+                if (t > 0.0f) {
+                    hit[0] = camPos[0] + rd[0] * t;
+                    hit[1] = gWaterline;
+                    hit[2] = camPos[2] + rd[2] * t;
+                    hasHit = fabsf(hit[0]) <= TER_HALF &&
+                             fabsf(hit[2]) <= TER_HALF;
+                }
+            }
             if (ImGui::GetIO().WantCaptureMouse)
                 hasHit = false;   // cursor over the panel: never paint through
             bool painting = hasHit && (mb & SDL_BUTTON_LMASK) && !shotPath;
