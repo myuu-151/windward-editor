@@ -1967,35 +1967,44 @@ static void gen_carve_paths(float seaLevel)
             }
         float stepH = g.terr > 0.05f ? g.terr
                                      : SDL_max(0.5f, g.height / 7.0f);
+        // One continuous helix rather than a ring per terrace. Built per
+        // level, consecutive rings sit at whatever radius their contour
+        // happens to be, so on a steep face they land on top of each
+        // other and the carve smears them into the slope -- which is what
+        // made the road merge into the cliff instead of wrapping it.
+        // Here the road's HEIGHT falls smoothly as it goes round, and the
+        // radius is wherever the ground currently stands at that height,
+        // so it climbs the hill as one unbroken shelf.
         std::vector<float> sxs, szs;
-        float ang = 0.0f;
         const float turn = SDL_max(0.05f, g.spiralTurn);
-        for (float lv = bestH - stepH * 0.5f;
-             lv > seaLevel + stepH * 0.5f && sxs.size() < 20000;
-             lv -= stepH) {
-            int nsteps = SDL_max(8, (int)(96.0f * turn));
-            for (int k = 0; k <= nsteps; k++) {
-                float a = ang + 6.2831853f * turn * k / nsteps;
-                float dx = cosf(a), dz = sinf(a);
-                float found = 0.0f;
-                for (float r = 0.0f; r < TER_HALF * 1.6f; r += cell * 0.6f) {
-                    float x = cx0 + dx * r, z = cz0 + dz * r;
-                    if (fabsf(x) > TER_HALF || fabsf(z) > TER_HALF)
-                        break;
-                    if (height_at(x, z) < lv)
-                        break;          // the lip of this terrace
-                    found = r;
-                }
-                if (found <= 0.0f)
-                    continue;
-                // sit on the tread, back from the drop
-                float rr = SDL_max(0.3f, found - halfW * 1.3f - g.spiralInset);
+        const float dropPerRad = stepH / (turn * 6.2831853f);
+        const float dA = 0.05f;
+        float ang = 0.0f, lv = bestH - stepH * 0.35f;
+        int guard = 0;
+        while (lv > seaLevel + stepH * 0.4f && guard++ < 40000) {
+            float dx = cosf(ang), dz = sinf(ang);
+            float found = 0.0f;
+            // coarse enough that a high-resolution map does not make
+            // this thousands of samples per degree of arc
+            const float rstep = SDL_max(cell * 0.6f, TER_HALF / 400.0f);
+            for (float r = 0.0f; r < TER_HALF * 1.6f; r += rstep) {
+                float x = cx0 + dx * r, z = cz0 + dz * r;
+                if (fabsf(x) > TER_HALF || fabsf(z) > TER_HALF)
+                    break;
+                if (height_at(x, z) < lv)
+                    break;              // the ground has fallen below us
+                found = r;
+            }
+            if (found > 0.0f) {
+                float rr = SDL_max(0.3f,
+                                   found - halfW * 1.3f - g.spiralInset);
                 sxs.push_back(SDL_clamp(cx0 + dx * rr, -TER_HALF + cell,
                                         TER_HALF - cell));
                 szs.push_back(SDL_clamp(cz0 + dz * rr, -TER_HALF + cell,
                                         TER_HALF - cell));
             }
-            ang += 6.2831853f * turn;
+            ang += dA;
+            lv -= dropPerRad * dA;
         }
         carve_route(sxs, szs);
         // and a way down to the water from where the road runs out
@@ -4968,8 +4977,15 @@ int main(int argc, char** argv)
                                     "instead, taking the short way.");
                             if (gGen.spiralRoad) {
                                 genDirty |= ImGui::SliderFloat(
-                                    "Turn per Terrace", &gGen.spiralTurn,
-                                    0.1f, 1.5f, "%.2f");
+                                    "Turns per Terrace", &gGen.spiralTurn,
+                                    0.1f, 4.0f, "%.2f");
+                                if (ImGui::IsItemHovered())
+                                    ImGui::SetTooltip(
+                                        "Laps of the hill the road takes to "
+                                        "climb one terrace.\nRaise it if "
+                                        "the road merges into the slope: "
+                                        "that is consecutive laps landing "
+                                        "on top of each other.");
                                 genDirty |= ImGui::SliderFloat(
                                     "Road Inset", &gGen.spiralInset,
                                     0.0f, 5.0f, "%.2f");
