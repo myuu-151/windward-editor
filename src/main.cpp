@@ -982,10 +982,16 @@ static const char* kBrushNames[14] = { "Sculpt", "Smooth", "Flatten",
 static float gTerraceStep = 2.0f;
 
 // stroke-level undo/redo: whole-state snapshots (~1 MB each, capped)
+// A snapshot carries the map's dimensions as well as its contents, so
+// operations that change the world size -- growing the canvas, resizing
+// the map -- are undoable like any other stroke.
 struct Snapshot {
     std::vector<float> h;
     std::vector<Uint8> m, m2, k;
     std::vector<PropInst> p;
+    std::vector<float> shore, gen;   // live shoreline / generator bases
+    float half = 0.0f, water = 0.0f;
+    int hn = 0, mask = 0, grid = 0, grass = 0;
 };
 static std::vector<Snapshot> gUndoStack, gRedoStack;
 
@@ -993,6 +999,7 @@ static std::vector<float> gShoreBase;   // heights before any shoreline
 static std::vector<float> gGenBase;     // heights before the generator
 static void mark_all_dirty();
 static float cpu_vnoise(float x, float y);
+static void push_undo();
 static bool gMapResized = false;   // a load changed the world size
 
 // Resize the world: resample every layer into the new resolution so the
@@ -1016,6 +1023,7 @@ static void new_map()
 
 static void resize_map(float newHalf)
 {
+    push_undo();   // snapshots carry the world size, so this is undoable
     int nGrid, nHN, nMask, nGrass;
     resolutions_for(newHalf, &nGrid, &nHN, &nMask, &nGrass);
 
@@ -1079,8 +1087,6 @@ static void resize_map(float newHalf)
 
     TER_HALF = newHalf;
     HN = nHN; MASK_N = nMask; GRID_N = nGrid; GRASS_N = nGrass;
-    gUndoStack.clear();
-    gRedoStack.clear();
     mark_all_dirty();
     SDL_Log("map resized to %.0f units: grid %d, heights %d, masks %d",
             newHalf * 2.0f, GRID_N, HN, MASK_N);
@@ -1098,6 +1104,7 @@ static void grow_canvas(float newHalf, float seaLevel)
 {
     if (newHalf <= TER_HALF + 0.01f)
         return;
+    push_undo();   // one Ctrl+Z takes the map back to its old bounds
     const float oldHalf = TER_HALF;
     const float margin = newHalf - oldHalf;
     int nGrid, nHN, nMask, nGrass;
@@ -1177,8 +1184,6 @@ static void grow_canvas(float newHalf, float seaLevel)
 
     TER_HALF = newHalf;
     HN = nHN; MASK_N = nMask; GRID_N = nGrid; GRASS_N = nGrass;
-    gUndoStack.clear();
-    gRedoStack.clear();
     mark_all_dirty();
     SDL_Log("map grew to %.0f units (sculpt untouched): grid %d, heights %d",
             newHalf * 2.0f, GRID_N, HN);
@@ -1207,9 +1212,34 @@ static void mark_all_dirty()
     gHeightsDirty = gMaskDirty = gMask2Dirty = gKillDirty = true;
 }
 
+static Snapshot capture_state()
+{
+    Snapshot s;
+    s.h = gHeights; s.m = gMask; s.m2 = gMask2; s.k = gKill; s.p = gProps;
+    s.shore = gShoreBase; s.gen = gGenBase;
+    s.half = TER_HALF; s.water = gWaterline;
+    s.hn = HN; s.mask = MASK_N; s.grid = GRID_N; s.grass = GRASS_N;
+    return s;
+}
+
+// restore a snapshot; flags a resize when the world size changed so the
+// caller can rebuild the size-bound buffers
+static void restore_state(const Snapshot& s)
+{
+    bool resized = (s.hn != HN || s.mask != MASK_N || s.grid != GRID_N ||
+                    s.grass != GRASS_N || s.half != TER_HALF);
+    gHeights = s.h; gMask = s.m; gMask2 = s.m2; gKill = s.k; gProps = s.p;
+    gShoreBase = s.shore; gGenBase = s.gen;
+    TER_HALF = s.half; gWaterline = s.water;
+    HN = s.hn; MASK_N = s.mask; GRID_N = s.grid; GRASS_N = s.grass;
+    if (resized)
+        gMapResized = true;
+    mark_all_dirty();
+}
+
 static void push_undo()
 {
-    gUndoStack.push_back({ gHeights, gMask, gMask2, gKill, gProps });
+    gUndoStack.push_back(capture_state());
     if (gUndoStack.size() > 32)
         gUndoStack.erase(gUndoStack.begin());
     gRedoStack.clear();
@@ -1219,22 +1249,20 @@ static void do_undo()
 {
     if (gUndoStack.empty())
         return;
-    gRedoStack.push_back({ gHeights, gMask, gMask2, gKill, gProps });
-    const Snapshot& s = gUndoStack.back();
-    gHeights = s.h; gMask = s.m; gMask2 = s.m2; gKill = s.k; gProps = s.p;
+    gRedoStack.push_back(capture_state());
+    Snapshot s = gUndoStack.back();   // by value: restoring resizes globals
     gUndoStack.pop_back();
-    mark_all_dirty();
+    restore_state(s);
 }
 
 static void do_redo()
 {
     if (gRedoStack.empty())
         return;
-    gUndoStack.push_back({ gHeights, gMask, gMask2, gKill, gProps });
-    const Snapshot& s = gRedoStack.back();
-    gHeights = s.h; gMask = s.m; gMask2 = s.m2; gKill = s.k; gProps = s.p;
+    gUndoStack.push_back(capture_state());
+    Snapshot s = gRedoStack.back();
     gRedoStack.pop_back();
-    mark_all_dirty();
+    restore_state(s);
 }
 
 static float cpu_vnoise(float x, float y);
@@ -2852,6 +2880,18 @@ int main(int argc, char** argv)
         gShoreBase.clear();
         gShore.on = false;
     };
+    // an undo/redo that crossed a resize needs the size-bound buffers back
+    auto refresh_if_resized = [&]() {
+        if (!gMapResized)
+            return;
+        gMapResized = false;
+        rebuild_terrain_mesh();
+        rebuild_grass_instances();
+        glBindBuffer(GL_ARRAY_BUFFER, instVbo);
+        glBufferData(GL_ARRAY_BUFFER, inst.size() * sizeof(float),
+                     inst.data(), GL_STATIC_DRAW);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+    };
     // widen the canvas around the sculpt, keeping it exactly where it is
     auto apply_canvas_grow = [&](float newHalf) {
         grow_canvas(newHalf, gWaterline);
@@ -3240,9 +3280,12 @@ int main(int argc, char** argv)
                 if (e.key.key == SDLK_G) showGrass = !showGrass;
                 if (e.key.key == SDLK_Z && (e.key.mod & SDL_KMOD_CTRL)) {
                     if (e.key.mod & SDL_KMOD_SHIFT) do_redo(); else do_undo();
+                    refresh_if_resized();
                 }
-                if (e.key.key == SDLK_Y && (e.key.mod & SDL_KMOD_CTRL))
+                if (e.key.key == SDLK_Y && (e.key.mod & SDL_KMOD_CTRL)) {
                     do_redo();
+                    refresh_if_resized();
+                }
                 if (e.key.key == SDLK_F5) { syncSettingsOut(); save_map(mapPath); }
                 if (e.key.key == SDLK_F9) { load_map(mapPath); applySettingsIn(); }
                 if (e.key.key == SDLK_LEFTBRACKET)
