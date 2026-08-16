@@ -1433,6 +1433,8 @@ struct GenParams {
     float spiralInset = 0.0f;// how far back from each drop the road sits
     float spiralHug = 0.5f;  // 0 = cut straight through risers, 1 = follow
                              // the terrace treads exactly
+    bool  roadSupport = false;  // build the hillside out to carry the road
+    float roadSupportW = 6.0f;  // how far the buttress reaches
     bool  shorePath = false;  // run one trail down to a landing beach
     bool  summitPath = true; // and one up to the island's high point
     bool  add = false;       // layer over the existing sculpt
@@ -1712,6 +1714,34 @@ static void road_carve(const std::vector<float>& rx,
                     }
                     h += (want - h) * g.pathCut;
                 }
+            if (g.roadSupport) {
+                // Build the hillside OUT to carry the road. Cutting alone
+                // can only take material away, so on a face too steep to
+                // hold a tread the road has nothing to sit on -- and two
+                // laps of a spiral cannot pass each other at all, since a
+                // heightmap keeps one height per spot. Filling underneath
+                // grows a buttress out of the slope: the lower lap's fill
+                // becomes the shelf the upper one needs, so the laps meet
+                // the hill instead of cutting into each other.
+                float sup = SDL_max(0.5f, g.roadSupportW);
+                int si0 = SDL_clamp((int)((cx - sup + TER_HALF) / cell), 0, HN - 1);
+                int si1 = SDL_clamp((int)((cx + sup + TER_HALF) / cell) + 1, 0, HN - 1);
+                int sj0 = SDL_clamp((int)((cz - sup + TER_HALF) / cell), 0, HN - 1);
+                int sj1 = SDL_clamp((int)((cz + sup + TER_HALF) / cell) + 1, 0, HN - 1);
+                for (int j = sj0; j <= sj1; j++)
+                    for (int ii = si0; ii <= si1; ii++) {
+                        float x = -TER_HALF + ii * cell;
+                        float z = -TER_HALF + j * cell;
+                        float dd = sqrtf((x - cx) * (x - cx) + (z - cz) * (z - cz));
+                        if (dd >= sup)
+                            continue;
+                        // never lower anything: this pass only adds land
+                        float floorH = ch - SDL_max(0.0f, dd - halfW) * bank;
+                        float& h = gHeights[(size_t)j * HN + ii];
+                        if (h < floorH)
+                            h = floorH;
+                    }
+            }
             if (!g.pathPaint)
                 continue;
             // lay the dirt, and clear blades off the tread
@@ -3031,6 +3061,8 @@ struct TuneBlob {
     float genSpiralTurn = GenParams().spiralTurn;
     float genSpiralInset = GenParams().spiralInset;
     float genSpiralHug = GenParams().spiralHug;
+    int   genRoadSupport = GenParams().roadSupport ? 1 : 0;
+    float genRoadSupportW = GenParams().roadSupportW;
     float genFlatSize = GenParams().flatSize;
     float genFlatFlat = GenParams().flatFlat;
     float genPathWidth = GenParams().pathWidth;
@@ -4017,6 +4049,8 @@ int main(int argc, char** argv)
         gTune.genSpiralTurn = gGen.spiralTurn;
         gTune.genSpiralInset = gGen.spiralInset;
         gTune.genSpiralHug = gGen.spiralHug;
+        gTune.genRoadSupport = gGen.roadSupport ? 1 : 0;
+        gTune.genRoadSupportW = gGen.roadSupportW;
         memset(gTune.propSelId, 0, sizeof gTune.propSelId);
         if (propSel >= 0 && propSel < (int)gPropMeshes.size())
             SDL_strlcpy(gTune.propSelId,
@@ -4888,6 +4922,12 @@ int main(int argc, char** argv)
                                                    "Soft Dirt (sand)" };
                             ImGui::Combo("Surface", &gGen.pathLayer, surf, 2);
                         }
+                        ImGui::Checkbox("Build Hillside for Road",
+                                        &gGen.roadSupport);
+                        if (gGen.roadSupport)
+                            ImGui::SliderFloat("Buttress Reach",
+                                               &gGen.roadSupportW,
+                                               1.0f, 20.0f, "%.1f");
                         ImGui::TextDisabled("shares the generator's road\n"
                                             "settings, so hand-drawn and\n"
                                             "generated roads match");
@@ -5133,6 +5173,23 @@ int main(int argc, char** argv)
                                 genDirty |= ImGui::SliderFloat(
                                     "Road Hugs Terraces", &gGen.spiralHug,
                                     0.0f, 1.0f, "%.2f");
+                                genDirty |= ImGui::Checkbox(
+                                    "Build Hillside for Road",
+                                    &gGen.roadSupport);
+                                if (ImGui::IsItemHovered())
+                                    ImGui::SetTooltip(
+                                        "Grows the slope outward to carry "
+                                        "the road instead of only cutting "
+                                        "into it.\nOn a face too steep to "
+                                        "hold a tread this is what gives "
+                                        "the road somewhere to sit, and "
+                                        "what lets laps of the spiral meet "
+                                        "up rather than cut through each "
+                                        "other.");
+                                if (gGen.roadSupport)
+                                    genDirty |= ImGui::SliderFloat(
+                                        "Buttress Reach", &gGen.roadSupportW,
+                                        1.0f, 20.0f, "%.1f");
                                 if (ImGui::IsItemHovered())
                                     ImGui::SetTooltip(
                                         "1: follows the terrace treads and "
