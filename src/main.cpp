@@ -4371,6 +4371,17 @@ int main(int argc, char** argv)
             std::string p = gDialogFile;
             if (p.size() < 7 || p.substr(p.size() - 7) != ".wworld")
                 p += ".wworld";
+            // A chart is only a list of paths to islands, so the island
+            // on screen has to reach disk first -- otherwise the cell
+            // still points at whatever was saved last and everything
+            // since (props, grass, paint) is missing from the world.
+            if (map_has_content()) {
+                if (gWorldCells[gWorldSel[1]][gWorldSel[0]].empty())
+                    gWorldCells[gWorldSel[1]][gWorldSel[0]] =
+                        slot_path(gWorldSel[0], gWorldSel[1]);
+                syncSettingsOut();
+                save_map(gWorldCells[gWorldSel[1]][gWorldSel[0]].c_str());
+            }
             save_world(p.c_str());
         } else if (gDialogAction == 5) {
             gDialogAction = 0;
@@ -5821,6 +5832,22 @@ int main(int argc, char** argv)
                         }
                     }
                     ImGui::TextDisabled("writes the chart next to zelda.exe");
+                    if (ImGui::Button("Save Island to Cell")) {
+                        // explicit version of what switching quadrants
+                        // does, for when you are staying put
+                        if (gWorldCells[gWorldSel[1]][gWorldSel[0]].empty())
+                            gWorldCells[gWorldSel[1]][gWorldSel[0]] =
+                                slot_path(gWorldSel[0], gWorldSel[1]);
+                        syncSettingsOut();
+                        save_map(gWorldCells[gWorldSel[1]][gWorldSel[0]].c_str());
+                        save_world(editor_chart_path().c_str());
+                    }
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Writes the open island into the "
+                                          "selected quadrant's slot.\nThe "
+                                          "chart only stores paths, so an "
+                                          "island has to be saved before a "
+                                          "world knows about it.");
                     ImGui::SeparatorText("World File");
                     if (ImGui::Button("Save World..."))
                         SDL_ShowSaveFileDialog(map_dialog_cb, (void*)4, win,
