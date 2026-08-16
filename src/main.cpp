@@ -3096,11 +3096,16 @@ int main(int argc, char** argv)
     }
     // --gen [seed]: open straight onto a generated island with the
     // generator live, instead of loading the saved workspace
-    bool genLive = false;
+    bool genLive = false, genSeedGiven = false;
+    float genHalfArg = 0.0f;
     if (argc >= 2 && SDL_strcmp(argv[1], "--gen") == 0) {
         genLive = true;
-        if (argc >= 3)
+        if (argc >= 3) {
             gGen.seed = SDL_atoi(argv[2]);
+            genSeedGiven = true;
+        }
+        if (argc >= 4)   // optional map size in units, e.g. 62
+            genHalfArg = (float)SDL_atof(argv[3]) * 0.5f;
     }
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
@@ -3861,6 +3866,30 @@ int main(int argc, char** argv)
     SDL_snprintf(mapPath, sizeof mapPath, "%s../map.bin", SDL_GetBasePath());
 
     if (genLive) {
+        // Open the saved workspace FIRST, purely for its world size and
+        // waterline. The generator's shape is relative to the map, but
+        // Height and Terrace Step are absolute world units -- so the same
+        // seed on a 48-unit map and on a grown one are different islands,
+        // and generating on a fresh 48 looked nothing like the workspace
+        // it was tuned in. The generator's own sliders are kept: the map's
+        // saved copies of them are whatever they were last written as.
+        GenParams keep = gGen;
+        if (load_world(editor_chart_path().c_str())) {
+            const std::string& cur = gWorldCells[gWorldSel[1]][gWorldSel[0]];
+            if (!cur.empty() && load_map(cur.c_str()))
+                applySettingsIn();
+            else if (load_map(mapPath))
+                applySettingsIn();
+        } else if (load_map(mapPath)) {
+            applySettingsIn();
+        }
+        gMapResized = false;
+        int seed = gGen.seed;
+        gGen = keep;
+        gGen.seed = genSeedGiven ? keep.seed : seed;
+        if (genHalfArg > 4.0f && fabsf(genHalfArg - TER_HALF) > 0.01f)
+            resize_map(genHalfArg);
+        new_map();                 // clear the loaded island, keep its size
         gGenBase = gHeights;
         gGenMask = gMask; gGenMask2 = gMask2; gGenKill = gKill;
         gGen.on = true;
@@ -3871,6 +3900,7 @@ int main(int argc, char** argv)
         camPos[0] = 0.0f;
         camPos[1] = TER_HALF * 0.95f;
         camPos[2] = TER_HALF * 1.45f;
+        SDL_Log("map is %.0f x %.0f units", TER_HALF * 2.0f, TER_HALF * 2.0f);
         SDL_Log("opened on generator seed %d (nothing saved until F5)",
                 gGen.seed);
     } else if (genShot) {
