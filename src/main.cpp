@@ -3094,6 +3094,14 @@ int main(int argc, char** argv)
         if (argc >= 4)
             gGen.seed = SDL_atoi(argv[3]);
     }
+    // --gen [seed]: open straight onto a generated island with the
+    // generator live, instead of loading the saved workspace
+    bool genLive = false;
+    if (argc >= 2 && SDL_strcmp(argv[1], "--gen") == 0) {
+        genLive = true;
+        if (argc >= 3)
+            gGen.seed = SDL_atoi(argv[2]);
+    }
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
@@ -3852,7 +3860,20 @@ int main(int argc, char** argv)
     char mapPath[600];
     SDL_snprintf(mapPath, sizeof mapPath, "%s../map.bin", SDL_GetBasePath());
 
-    if (genShot) {
+    if (genLive) {
+        gGenBase = gHeights;
+        gGenMask = gMask; gGenMask2 = gMask2; gGenKill = gKill;
+        gGen.on = true;
+        apply_generator(gWaterline);
+        activeTab = 0;
+        yaw = 0.0f;
+        pitch = -0.55f;
+        camPos[0] = 0.0f;
+        camPos[1] = TER_HALF * 0.95f;
+        camPos[2] = TER_HALF * 1.45f;
+        SDL_Log("opened on generator seed %d (nothing saved until F5)",
+                gGen.seed);
+    } else if (genShot) {
         gGenBase = gHeights;
         gGenMask = gMask; gGenMask2 = gMask2; gGenKill = gKill;
         gGen.on = true;
