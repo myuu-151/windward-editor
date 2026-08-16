@@ -3162,8 +3162,17 @@ static bool import_glb(const std::string& path)
     std::vector<float> data;
     float lo[3] = { 1e9f, 1e9f, 1e9f }, hi[3] = { -1e9f, -1e9f, -1e9f };
 
-    for (cgltf_size mi = 0; mi < d->meshes_count; mi++) {
-        const cgltf_mesh& me = d->meshes[mi];
+    // Walk NODES, not meshes: a glb positions its objects with node
+    // transforms, and a mesh can be instanced by several of them. Reading
+    // the mesh list alone drops every placement, so a whole scene collapses
+    // onto the origin and you see only whatever is biggest.
+    for (cgltf_size ni = 0; ni < d->nodes_count; ni++) {
+        const cgltf_node& nd = d->nodes[ni];
+        if (!nd.mesh)
+            continue;
+        cgltf_float xf[16];
+        cgltf_node_transform_world(&nd, xf);
+        const cgltf_mesh& me = *nd.mesh;
         for (cgltf_size pi = 0; pi < me.primitives_count; pi++) {
             const cgltf_primitive& pr = me.primitives[pi];
             if (pr.type != cgltf_primitive_type_triangles)
@@ -3225,6 +3234,22 @@ static bool import_glb(const std::string& path)
                 cgltf_accessor_read_float(pos, v, p3, 3);
                 if (nrm) cgltf_accessor_read_float(nrm, v, n3, 3);
                 if (uv)  cgltf_accessor_read_float(uv, v, t2, 2);
+                // into the node's world space
+                const float wx = xf[0] * p3[0] + xf[4] * p3[1] +
+                                 xf[8] * p3[2] + xf[12];
+                const float wy = xf[1] * p3[0] + xf[5] * p3[1] +
+                                 xf[9] * p3[2] + xf[13];
+                const float wz = xf[2] * p3[0] + xf[6] * p3[1] +
+                                 xf[10] * p3[2] + xf[14];
+                p3[0] = wx; p3[1] = wy; p3[2] = wz;
+                // normals by the rotation part only, then renormalised
+                const float nx2 = xf[0] * n3[0] + xf[4] * n3[1] + xf[8] * n3[2];
+                const float ny2 = xf[1] * n3[0] + xf[5] * n3[1] + xf[9] * n3[2];
+                const float nz2 = xf[2] * n3[0] + xf[6] * n3[1] + xf[10] * n3[2];
+                const float nl = sqrtf(nx2 * nx2 + ny2 * ny2 + nz2 * nz2);
+                if (nl > 1e-6f) {
+                    n3[0] = nx2 / nl; n3[1] = ny2 / nl; n3[2] = nz2 / nl;
+                }
                 for (int c = 0; c < 3; c++) {
                     lo[c] = SDL_min(lo[c], p3[c]);
                     hi[c] = SDL_max(hi[c], p3[c]);
