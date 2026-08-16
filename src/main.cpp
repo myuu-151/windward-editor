@@ -931,6 +931,10 @@ struct PropInst {
 };
 static std::vector<PropInst> gProps;
 static float gWaterline = -3.0f;   // sea level, world units
+// A quadrant can hold nothing but props -- a level built entirely out of
+// imported geometry wants no ground plane under it at all, and a flat
+// plane at sea level is not "nothing", it is a floor in the way.
+static bool gShowGround = true;
 
 static float height_at(float x, float z)
 {
@@ -3180,12 +3184,18 @@ static bool import_glb(const std::string& path)
             const cgltf_accessor* pos = nullptr;
             const cgltf_accessor* nrm = nullptr;
             const cgltf_accessor* uv = nullptr;
+            // Blender bakes a lot of look into vertex colours -- leaf
+            // tints especially -- and the exporter carries them, so a
+            // model that arrives white was usually coloured this way
+            const cgltf_accessor* col = nullptr;
             for (cgltf_size ai = 0; ai < pr.attributes_count; ai++) {
                 const cgltf_attribute& at = pr.attributes[ai];
                 if (at.type == cgltf_attribute_type_position) pos = at.data;
                 else if (at.type == cgltf_attribute_type_normal) nrm = at.data;
                 else if (at.type == cgltf_attribute_type_texcoord && !uv)
                     uv = at.data;
+                else if (at.type == cgltf_attribute_type_color && !col)
+                    col = at.data;
             }
             if (!pos)
                 continue;
@@ -3254,10 +3264,13 @@ static bool import_glb(const std::string& path)
                     lo[c] = SDL_min(lo[c], p3[c]);
                     hi[c] = SDL_max(hi[c], p3[c]);
                 }
+                float c4[4] = { 1, 1, 1, 1 };
+                if (col)
+                    cgltf_accessor_read_float(col, v, c4, 4);
                 data.insert(data.end(), { p3[0], p3[1], p3[2],
                                           n3[0], n3[1], n3[2],
                                           t2[0], t2[1],
-                                          1.0f, 1.0f, 1.0f });
+                                          c4[0], c4[1], c4[2] });
             }
             sub.count = (int)(data.size() / 11) - sub.first;
             if (sub.count > 0)
@@ -5184,6 +5197,7 @@ int main(int argc, char** argv)
         glDepthMask(GL_TRUE);
 
         // terrain
+        if (gShowGround) {
         glUseProgram(terProg);
         glUniformMatrix4fv(glGetUniformLocation(terProg, "uMvp"), 1, GL_FALSE, mvp.m);
         glUniform1f(glGetUniformLocation(terProg, "uHalf"), TER_HALF);
@@ -5292,8 +5306,9 @@ int main(int argc, char** argv)
                            nullptr);
         }
 
+        }   // gShowGround
         // island skirt underside
-        if (islandDepth > 0.05f) {
+        if (gShowGround && islandDepth > 0.05f) {
             glUseProgram(skirtProg);
             glUniformMatrix4fv(glGetUniformLocation(skirtProg, "uMvp"), 1,
                                GL_FALSE, mvp.m);
@@ -5432,7 +5447,8 @@ int main(int argc, char** argv)
             glUniform1i(glGetUniformLocation(grassProg, "uFlatten"), 0);
             glDisable(GL_CULL_FACE);
             glBindVertexArray(grassVao);
-            glDrawArraysInstanced(GL_TRIANGLES, 0, 12, instCount);
+            if (gShowGround)
+                glDrawArraysInstanced(GL_TRIANGLES, 0, 12, instCount);
         }
 
         // sky fills the rest
@@ -6312,6 +6328,7 @@ int main(int argc, char** argv)
                             slot.clear();
                         }
                         new_map();
+                        gShowGround = false;   // nothing at all, not a floor
                         gGen.on = false;
                         gGenBase.clear();
                         gGenMask.clear(); gGenMask2.clear(); gGenKill.clear();
