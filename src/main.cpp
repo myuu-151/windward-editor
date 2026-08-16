@@ -3350,6 +3350,7 @@ static int gWorldSize = 7;               // Wind Waker's chart is 7x7
 static std::string gWorldCells[WORLD_MAX][WORLD_MAX];
 static int gWorldSel[2] = { 0, 0 };
 static int gTestCell[2] = { 1, 0 };   // built-in test island quadrant
+static int gSpawnCell[2] = { -1, -1 };  // where the game starts you; -1 = unset
 static bool gShowWater = true;
 
 // Every quadrant is a slot on disk under the editor, so islands persist
@@ -3427,6 +3428,10 @@ static bool load_world(const char* path)
             gWorldSize = SDL_clamp(n, 2, WORLD_MAX);
         else if (sscanf(line, "waterline %f", &wl) == 1)
             gWaterline = wl;
+        else if (sscanf(line, "spawn %d %d", &x, &y) == 2) {
+            gSpawnCell[0] = SDL_clamp(x, 0, WORLD_MAX - 1);
+            gSpawnCell[1] = SDL_clamp(y, 0, WORLD_MAX - 1);
+        }
         else if (sscanf(line, "testisland %d %d", &x, &y) == 2) {
             gTestCell[0] = x;
             gTestCell[1] = y;
@@ -5841,6 +5846,26 @@ int main(int argc, char** argv)
                         syncSettingsOut();
                         save_map(gWorldCells[gWorldSel[1]][gWorldSel[0]].c_str());
                         save_world(editor_chart_path().c_str());
+                    }
+                    {
+                        bool isSpawn = gSpawnCell[0] == gWorldSel[0] &&
+                                       gSpawnCell[1] == gWorldSel[1];
+                        char lbl[64];
+                        SDL_snprintf(lbl, sizeof lbl,
+                                     isSpawn ? "Start Cell: %c%d (set)"
+                                             : "Start Here (%c%d)",
+                                     'A' + gWorldSel[0], gWorldSel[1] + 1);
+                        if (ImGui::Button(lbl)) {
+                            gSpawnCell[0] = gWorldSel[0];
+                            gSpawnCell[1] = gWorldSel[1];
+                            save_world(editor_chart_path().c_str());
+                        }
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip(
+                                "The game drops you into this quadrant "
+                                "instead of its usual start.\nSaved into "
+                                "the chart, so Install Chart to Game "
+                                "carries it across.");
                     }
                     if (ImGui::IsItemHovered())
                         ImGui::SetTooltip("Writes the open island into the "
