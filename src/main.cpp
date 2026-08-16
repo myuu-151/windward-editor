@@ -3725,6 +3725,7 @@ struct TuneBlob {
     int   autoGrow = 1;
     int   trimSkirt = 0;
     float detailMult = 1.0f;
+    int   propsOnly = 0;   // quadrant built from props, no ground
     int   genFlats = GenParams().flats;
     int   genPaths = GenParams().paths ? 1 : 0;
     int   genPathPaint = GenParams().pathPaint ? 1 : 0;
@@ -4718,6 +4719,7 @@ int main(int argc, char** argv)
         gTune.autoGrow = autoGrow ? 1 : 0;
         gTune.trimSkirt = trimSkirt ? 1 : 0;
         gTune.detailMult = gDetailMult;
+        gTune.propsOnly = gShowGround ? 0 : 1;
         gTune.genFlats = gGen.flats;
         gTune.genPaths = gGen.paths ? 1 : 0;
         gTune.genPathPaint = gGen.pathPaint ? 1 : 0;
@@ -4796,6 +4798,7 @@ int main(int argc, char** argv)
             autoGrow = gTune.autoGrow != 0;
             trimSkirt = gTune.trimSkirt != 0;
             gDetailMult = SDL_clamp(gTune.detailMult, 0.5f, 4.0f);
+            gShowGround = gTune.propsOnly == 0;
             if (gTune.propSelId[0]) {
                 for (int mi = 0; mi < (int)gPropMeshes.size(); mi++)
                     if (mesh_id(gPropMeshes[mi]) == gTune.propSelId) {
@@ -5605,7 +5608,7 @@ int main(int argc, char** argv)
             };
 
             if (ImGui::BeginTabBar("tools")) {
-                if (ImGui::BeginTabItem("Sculpt")) {
+                if (gShowGround && ImGui::BeginTabItem("Sculpt")) {
                     activeTab = 0;
                     const char* tools[] = { "Raise or Lower Terrain",
                                             "Smooth Height", "Flatten",
@@ -5787,7 +5790,7 @@ int main(int argc, char** argv)
                     }
                     ImGui::EndTabItem();
                 }
-                if (ImGui::BeginTabItem("Shape")) {
+                if (gShowGround && ImGui::BeginTabItem("Shape")) {
                     activeTab = 0;
                     ImGui::TextWrapped(
                         "Generates a whole island from a seed. Live: every "
@@ -6086,7 +6089,7 @@ int main(int argc, char** argv)
                         apply_generator(gWaterline);
                     ImGui::EndTabItem();
                 }
-                if (ImGui::BeginTabItem("Paint")) {
+                if (gShowGround && ImGui::BeginTabItem("Paint")) {
                     activeTab = 1;
                     ImGui::TextWrapped("Paints the selected layer onto the "
                                        "terrain.");
@@ -6125,7 +6128,7 @@ int main(int argc, char** argv)
                                        0.0f, 1.0f, "%.2f");
                     ImGui::EndTabItem();
                 }
-                if (ImGui::BeginTabItem("Details")) {
+                if (gShowGround && ImGui::BeginTabItem("Details")) {
                     activeTab = 2;
                     ImGui::TextWrapped("Paint grass blades. Density and "
                                        "pattern are baked into the stroke.");
