@@ -1790,6 +1790,18 @@ static void road_carve(const std::vector<float>& rx,
                               halfW;
                     if (d >= 1.0f)
                         continue;
+                    // A splat mask is indexed by world XZ, so it belongs
+                    // to a COLUMN of ground rather than to a surface: on a
+                    // steep face one mask cell covers the whole height of
+                    // that face and the paint smears down it instead of
+                    // lying along the road. Leave steep ground unpainted
+                    // -- it also stops the road bleeding over whatever was
+                    // already painted either side of the cut.
+                    float hc = height_at(x, z);
+                    float sx = fabsf(height_at(x + cell, z) - hc);
+                    float sz = fabsf(height_at(x, z + cell) - hc);
+                    if (SDL_max(sx, sz) / cell > 0.9f)
+                        continue;
                     // ragged edge, so the trail is not a clean stripe
                     float e = 1.0f - d + (cpu_vnoise(x * 0.7f, z * 0.7f) - 0.5f) * 0.5f;
                     if (e <= 0.05f)
