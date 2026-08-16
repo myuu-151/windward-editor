@@ -3968,41 +3968,17 @@ int main(int argc, char** argv)
             gShowWater = gTune.showWater != 0;
             islandFrill = gTune.islandFrill;
             islandBulge = gTune.islandBulge;
-            gGen.seed = gTune.genSeed;
-            gGen.detail = SDL_clamp(gTune.genDetail, 1, 8);
-            gGen.peaks = SDL_clamp(gTune.genPeaks, 0, 6);
-            gGen.add = gTune.genAdd != 0;
-            // the generator's live state cannot survive a reload -- its
-            // "before" snapshot is not in the file -- so the sliders come
-            // back but the terrain stays as it was saved
+            // The generator's sliders are deliberately NOT restored from
+            // the map. They are a tool preset, not map content -- whatever
+            // the generator produced is already baked into the heights --
+            // and restoring them meant any map saved with older values
+            // handed those back every time it was opened, quietly
+            // overriding the built-in defaults. Reset to Defaults in the
+            // Shape tab is the way back to them.
             gGen.on = false;
             gGenBase.clear();
-            gGen.size = gTune.genSize;      gGen.coast = gTune.genCoast;
-            gGen.lumps = gTune.genLumps;    gGen.warp = gTune.genWarp;
-            gGen.height = gTune.genHeight;  gGen.rough = gTune.genRough;
-            gGen.fscale = gTune.genScale;   gGen.ridge = gTune.genRidge;
-            gGen.peakH = gTune.genPeakH;    gGen.peakSpread = gTune.genSpread;
-            gGen.plateau = gTune.genPlateau; gGen.terr = gTune.genTerr;
-            gGen.beach = gTune.genBeach;    gGen.drop = gTune.genDrop;
             autoGrow = gTune.autoGrow != 0;
             trimSkirt = gTune.trimSkirt != 0;
-            gGen.flats = SDL_clamp(gTune.genFlats, 0, 6);
-            gGen.paths = gTune.genPaths != 0;
-            gGen.pathPaint = gTune.genPathPaint != 0;
-            gGen.shorePath = gTune.genShorePath != 0;
-            gGen.flatSize = gTune.genFlatSize;
-            gGen.flatFlat = gTune.genFlatFlat;
-            gGen.pathWidth = gTune.genPathWidth;
-            gGen.pathWander = gTune.genPathWander;
-            gGen.pathCut = gTune.genPathCut;
-            gGen.pathGrade = gTune.genPathGrade;
-            gGen.pathBank = gTune.genPathBank;
-            gGen.pathCling = gTune.genPathCling;
-            gGen.summitPath = gTune.genSummitPath != 0;
-            gGen.pathLayer = SDL_clamp(gTune.genPathLayer, 0, 1);
-            gGen.spiralRoad = gTune.genSpiral != 0;
-            gGen.spiralTurn = gTune.genSpiralTurn;
-            gGen.spiralInset = gTune.genSpiralInset;
             if (gTune.propSelId[0]) {
                 for (int mi = 0; mi < (int)gPropMeshes.size(); mi++)
                     if (mesh_id(gPropMeshes[mi]) == gTune.propSelId) {
@@ -4056,6 +4032,9 @@ int main(int argc, char** argv)
         }
         gMapResized = false;
     }
+    SDL_Log("gen defaults in effect: seed %d size %.2f height %.1f terr %.2f "
+            "detail %d fscale %.2f plateau %.2f", gGen.seed, gGen.size,
+            gGen.height, gGen.terr, gGen.detail, gGen.fscale, gGen.plateau);
 
     SDL_Log("RMB=look WASD/QE=fly LMB=brush wheel=radius "
             "1=raise(+shift lower) 2=smooth 3=dirt 4=grass G=grass F5/F9=save/load");
@@ -5049,6 +5028,18 @@ int main(int argc, char** argv)
                                               "top of what you already had.\n"
                                               "Off: replaces the terrain "
                                               "entirely.");
+                        if (ImGui::Button("Reset to Defaults")) {
+                            int keepSeed = gGen.seed;
+                            bool keepOn = gGen.on;
+                            gGen = GenParams();
+                            gGen.seed = keepSeed;
+                            gGen.on = keepOn;
+                            genDirty = true;
+                        }
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Every slider back to the "
+                                              "built-in defaults, keeping "
+                                              "the seed.");
                         if (ImGui::Button("Bake into Terrain")) {
                             gGenBase.clear();   // keep the result, drop revert
                             gGenMask.clear(); gGenMask2.clear();
