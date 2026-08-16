@@ -6305,8 +6305,7 @@ int main(int argc, char** argv)
                     if (ImGui::IsItemHovered())
                         ImGui::SetTooltip("Empties the quadrant: the island, "
                                           "its file and its place on the "
-                                          "chart.
-This deletes the .wmap on "
+                                          "chart.\nThis deletes the .wmap on "
                                           "disk.");
                     ImGui::SeparatorText("Send to Game");
                     if (ImGui::Button("Install Chart to Game")) {
