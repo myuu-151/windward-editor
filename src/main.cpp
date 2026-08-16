@@ -33,6 +33,8 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#define CGLTF_IMPLEMENTATION
+#include "cgltf.h"
 
 // World extent and resolutions. These scale together: a bigger island
 // gets proportionally more height samples, mask texels, mesh quads and
@@ -3027,6 +3029,138 @@ static void gen_landmarks(float seaLevel)
     }
 }
 
+// ---- glb import
+// Brings an outside model in as a prop. The pack's props are OBJ, but a
+// glb is what everything else exports, so this reads one into the same
+// interleaved layout (pos3 norm3 uv2 col3) the OBJ loader produces and
+// registers it under an "Imported" category. Colour comes from each
+// material's base-colour factor; textures are not unpacked yet, so a
+// textured model arrives in its flat material colours.
+static bool import_glb(const std::string& path)
+{
+    cgltf_options opt{};
+    cgltf_data* d = nullptr;
+    if (cgltf_parse_file(&opt, path.c_str(), &d) != cgltf_result_success)
+        return false;
+    if (cgltf_load_buffers(&opt, d, path.c_str()) != cgltf_result_success) {
+        cgltf_free(d);
+        return false;
+    }
+
+    PropMesh m;
+    m.category = "Imported";
+    {
+        size_t a = path.find_last_of("/\\");
+        m.label = a == std::string::npos ? path : path.substr(a + 1);
+        size_t dot = m.label.find_last_of('.');
+        if (dot != std::string::npos)
+            m.label = m.label.substr(0, dot);
+    }
+    m.objPath = path;
+    std::vector<float> data;
+    float lo[3] = { 1e9f, 1e9f, 1e9f }, hi[3] = { -1e9f, -1e9f, -1e9f };
+
+    for (cgltf_size mi = 0; mi < d->meshes_count; mi++) {
+        const cgltf_mesh& me = d->meshes[mi];
+        for (cgltf_size pi = 0; pi < me.primitives_count; pi++) {
+            const cgltf_primitive& pr = me.primitives[pi];
+            if (pr.type != cgltf_primitive_type_triangles)
+                continue;
+            const cgltf_accessor* pos = nullptr;
+            const cgltf_accessor* nrm = nullptr;
+            const cgltf_accessor* uv = nullptr;
+            for (cgltf_size ai = 0; ai < pr.attributes_count; ai++) {
+                const cgltf_attribute& at = pr.attributes[ai];
+                if (at.type == cgltf_attribute_type_position) pos = at.data;
+                else if (at.type == cgltf_attribute_type_normal) nrm = at.data;
+                else if (at.type == cgltf_attribute_type_texcoord && !uv)
+                    uv = at.data;
+            }
+            if (!pos)
+                continue;
+
+            PropMaterial mat;
+            mat.name = m.label;
+            if (pr.material && pr.material->has_pbr_metallic_roughness) {
+                const float* bc =
+                    pr.material->pbr_metallic_roughness.base_color_factor;
+                for (int k = 0; k < 3; k++) {
+                    mat.kd[k] = bc[k];
+                    mat.ka[k] = bc[k] * 0.72f;   // a little darker underneath
+                }
+                if (pr.material->name)
+                    mat.name = pr.material->name;
+            }
+            const int matIdx = (int)m.mats.size();
+            m.mats.push_back(mat);
+
+            PropSubmesh sub;
+            sub.mat = matIdx;
+            sub.first = (int)(data.size() / 11);
+
+            const cgltf_size n = pr.indices ? pr.indices->count : pos->count;
+            for (cgltf_size k = 0; k < n; k++) {
+                const cgltf_size v =
+                    pr.indices ? cgltf_accessor_read_index(pr.indices, k) : k;
+                float p3[3] = { 0, 0, 0 }, n3[3] = { 0, 1, 0 }, t2[2] = { 0, 0 };
+                cgltf_accessor_read_float(pos, v, p3, 3);
+                if (nrm) cgltf_accessor_read_float(nrm, v, n3, 3);
+                if (uv)  cgltf_accessor_read_float(uv, v, t2, 2);
+                for (int c = 0; c < 3; c++) {
+                    lo[c] = SDL_min(lo[c], p3[c]);
+                    hi[c] = SDL_max(hi[c], p3[c]);
+                }
+                data.insert(data.end(), { p3[0], p3[1], p3[2],
+                                          n3[0], n3[1], n3[2],
+                                          t2[0], t2[1],
+                                          1.0f, 1.0f, 1.0f });
+            }
+            sub.count = (int)(data.size() / 11) - sub.first;
+            if (sub.count > 0)
+                m.subs.push_back(sub);
+        }
+    }
+    cgltf_free(d);
+    if (data.empty())
+        return false;
+
+    m.boundR = SDL_max(0.05f, SDL_max(hi[0] - lo[0], hi[2] - lo[2]) * 0.5f);
+    m.boundH = SDL_max(0.05f, hi[1] - lo[1]);
+    glGenVertexArrays(1, &m.vao);
+    glBindVertexArray(m.vao);
+    glGenBuffers(1, &m.vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, m.vbo);
+    glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), data.data(),
+                 GL_STATIC_DRAW);
+    for (int a = 0; a < 4; a++)
+        glEnableVertexAttribArray(a);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 11 * sizeof(float),
+                          (void*)0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 11 * sizeof(float),
+                          (void*)(3 * sizeof(float)));
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 11 * sizeof(float),
+                          (void*)(6 * sizeof(float)));
+    glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, 11 * sizeof(float),
+                          (void*)(8 * sizeof(float)));
+    glBindVertexArray(0);
+    m.loaded = true;
+
+    gPropMeshes.push_back(m);
+    const int idx = (int)gPropMeshes.size() - 1;
+    bool placed = false;
+    for (PropCategory& c : gPropCats)
+        if (c.name == "Imported") { c.meshes.push_back(idx); placed = true; }
+    if (!placed) {
+        PropCategory c;
+        c.name = "Imported";
+        c.meshes.push_back(idx);
+        gPropCats.push_back(c);
+    }
+    SDL_Log("imported %s: %d verts, %d parts", m.label.c_str(),
+            (int)(data.size() / 11), (int)m.subs.size());
+    return true;
+}
+
 static void scan_props(const std::string& dir)
 {
     namespace fs = std::filesystem;
@@ -3620,6 +3754,9 @@ static volatile int gDialogAction = 0;   // 1..5, see handler
 static char gDialogFile[1024];
 static const SDL_DialogFileFilter kMapFilters[] = {
     { "Windward map", "wmap" },
+};
+static const SDL_DialogFileFilter kGlbFilters[] = {
+    { "glTF binary", "glb" },
 };
 static const SDL_DialogFileFilter kWorldFilters[] = {
     { "Windward world", "wworld" },
@@ -4569,6 +4706,10 @@ int main(int argc, char** argv)
                 save_map(gWorldCells[gWorldSel[1]][gWorldSel[0]].c_str());
             }
             save_world(p.c_str());
+        } else if (gDialogAction == 6) {
+            gDialogAction = 0;
+            if (!import_glb(gDialogFile))
+                SDL_Log("could not import %s", gDialogFile);
         } else if (gDialogAction == 5) {
             gDialogAction = 0;
             if (load_world(gDialogFile)) {
@@ -5747,6 +5888,17 @@ int main(int argc, char** argv)
                 }
                 if (ImGui::BeginTabItem("Props")) {
                     activeTab = 3;
+                    if (ImGui::Button("Import GLB..."))
+                        SDL_ShowOpenFileDialog(map_dialog_cb, (void*)6, win,
+                                               kGlbFilters, 1, nullptr, false);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip(
+                            "Brings your own model in as a prop, under an "
+                            "Imported category.\nColours come from each "
+                            "material's base colour; textures are not "
+                            "unpacked yet, so a textured model arrives "
+                            "flat-shaded.");
+                    ImGui::Separator();
                     ImGui::RadioButton("Place", &propTool, 0);
                     ImGui::SameLine();
                     ImGui::RadioButton("Scatter", &propTool, 1);
@@ -6032,6 +6184,37 @@ int main(int argc, char** argv)
                         }
                     }
                     ImGui::TextDisabled("writes the chart next to zelda.exe");
+                    if (ImGui::Button("Clear Cell")) {
+                        // wipe the quadrant: the island on screen, the file
+                        // behind it, and the chart's reference to it
+                        std::string& slot = gWorldCells[gWorldSel[1]][gWorldSel[0]];
+                        if (!slot.empty()) {
+                            std::error_code ec2;
+                            std::filesystem::remove(slot, ec2);
+                            slot.clear();
+                        }
+                        new_map();
+                        gGen.on = false;
+                        gGenBase.clear();
+                        gGenMask.clear(); gGenMask2.clear(); gGenKill.clear();
+                        gGenProps.clear();
+                        save_world(editor_chart_path().c_str());
+                        rebuild_terrain_mesh();
+                        rebuild_grass_instances();
+                        glBindBuffer(GL_ARRAY_BUFFER, instVbo);
+                        glBufferData(GL_ARRAY_BUFFER,
+                                     inst.size() * sizeof(float),
+                                     inst.data(), GL_STATIC_DRAW);
+                        glBindBuffer(GL_ARRAY_BUFFER, 0);
+                        SDL_Log("cleared %c%d", 'A' + gWorldSel[0],
+                                gWorldSel[1] + 1);
+                    }
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Empties the selected quadrant: the "
+                                          "island, its file and its place on "
+                                          "the chart.\nThis deletes the .wmap "
+                                          "on disk.");
+                    ImGui::SameLine();
                     if (ImGui::Button("Save Island to Cell")) {
                         // explicit version of what switching quadrants
                         // does, for when you are staying put

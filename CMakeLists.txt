@@ -45,3 +45,6 @@ if(MSVC)
     target_compile_options(terrain PRIVATE /W4)
     set_target_properties(terrain PROPERTIES WIN32_EXECUTABLE $<CONFIG:Release>)
 endif()
+
+# glb import for custom props
+target_include_directories(terrain PRIVATE third_party/cgltf)
