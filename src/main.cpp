@@ -5198,6 +5198,26 @@ int main(int argc, char** argv)
                         genDirty = true;
                     }
                     if (gGen.on) {
+                        ImGui::SeparatorText("Resolution");
+                        {
+                            bool x2 = gDetailMult > 1.5f;
+                            if (ImGui::Checkbox("Detail x2", &x2)) {
+                                gDetailMult = x2 ? 2.0f : 1.0f;
+                                apply_detail();
+                                refresh_if_resized();
+                                genDirty = true;
+                            }
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip(
+                                    "Twice the cells for the same world, so "
+                                    "road treads, ramps and painted edges "
+                                    "stop being a few cells wide.\nCosts "
+                                    "memory and frame time everywhere -- the "
+                                    "grid is uniform, so it cannot be spent "
+                                    "only where it is needed.");
+                            ImGui::SameLine();
+                            ImGui::TextDisabled("grid %d", GRID_N);
+                        }
                         ImGui::SeparatorText("Seed");
                         genDirty |= ImGui::InputInt("Seed", &gGen.seed);
                         if (ImGui::Button("Randomize")) {
