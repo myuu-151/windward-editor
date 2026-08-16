@@ -5200,13 +5200,27 @@ int main(int argc, char** argv)
                     if (gGen.on) {
                         ImGui::SeparatorText("Resolution");
                         {
-                            bool x2 = gDetailMult > 1.5f;
+                            bool x2 = gDetailMult > 1.5f && gDetailMult < 3.0f;
+                            bool x4 = gDetailMult >= 3.0f;
                             if (ImGui::Checkbox("Detail x2", &x2)) {
                                 gDetailMult = x2 ? 2.0f : 1.0f;
                                 apply_detail();
                                 refresh_if_resized();
                                 genDirty = true;
                             }
+                            ImGui::SameLine();
+                            if (ImGui::Checkbox("x4", &x4)) {
+                                gDetailMult = x4 ? 4.0f : 1.0f;
+                                apply_detail();
+                                refresh_if_resized();
+                                genDirty = true;
+                            }
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip(
+                                    "Four times the cells. Sixteen times the "
+                                    "heightmap and mask memory, so expect it "
+                                    "to be slow to regenerate and to sculpt "
+                                    "on.");
                             if (ImGui::IsItemHovered())
                                 ImGui::SetTooltip(
                                     "Twice the cells for the same world, so "
