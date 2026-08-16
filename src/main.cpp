@@ -1433,7 +1433,7 @@ struct GenParams {
     float spiralInset = 0.0f;// how far back from each drop the road sits
     float spiralHug = 0.5f;  // 0 = cut straight through risers, 1 = follow
                              // the terrace treads exactly
-    float pathFollow = 0.65f;   // 0 = hold one graded line, 1 = drape over
+    float pathFollow = 0.0f;    // 0 = hold one graded line, 1 = drape over
                                 // the ground as it is
     bool  roadSupport = false;  // build the hillside out to carry the road
     float roadSupportW = 6.0f;  // how far the buttress reaches
