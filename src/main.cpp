@@ -2723,10 +2723,20 @@ int main(int argc, char** argv)
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
     // top-down projection: world xz -> clip xy over the terrain extent
+    // top-down projection for the AO pass. Rebuilt per frame from the
+    // CURRENT world size: baking it once meant that after the map grew,
+    // the AO map still covered the old extent while the terrain looked
+    // AO up across the new one, so every blade's contact shadow landed
+    // in the wrong place -- including on the dirt paths, which have no
+    // blades and should stay open.
     Mat4 topDown{};
-    topDown.m[0] = 1.0f / TER_HALF;
-    topDown.m[9] = 1.0f / TER_HALF;
-    topDown.m[15] = 1.0f;
+    auto build_topdown = [&]() {
+        topDown = Mat4{};
+        topDown.m[0] = 1.0f / TER_HALF;
+        topDown.m[9] = 1.0f / TER_HALF;
+        topDown.m[15] = 1.0f;
+    };
+    build_topdown();
 
     // shadow map
     const int SHADOW_N = 2048;
@@ -3082,7 +3092,14 @@ int main(int argc, char** argv)
     GLuint skirtProg = make_program(SKIRT_VS, SKIRT_FS);
     GLuint skirtVao = 0, skirtVbo = 0, skirtIbo = 0;
     int skirtIdxCount = 0;
-    {
+    // The skirt rings the map's perimeter, so it has to follow the world
+    // size: built once, a grown map kept an underside sized for its old
+    // bounds. Rebuilt whenever the extent or the grid changes.
+    float skirtHalf = 0.0f;
+    int skirtGrid = 0;
+    auto build_skirt = [&]() {
+        skirtHalf = TER_HALF;
+        skirtGrid = GRID_N;
         std::vector<float> ring;   // perimeter xz positions, CCW
         for (int i = 0; i < GRID_N; i++)
             ring.insert(ring.end(),
@@ -3112,9 +3129,11 @@ int main(int argc, char** argv)
             si.insert(si.end(), { b, (unsigned)centerIdx, d }); // cap fan
         }
         skirtIdxCount = (int)si.size();
-        glGenVertexArrays(1, &skirtVao);
-        glGenBuffers(1, &skirtVbo);
-        glGenBuffers(1, &skirtIbo);
+        if (!skirtVao) {
+            glGenVertexArrays(1, &skirtVao);
+            glGenBuffers(1, &skirtVbo);
+            glGenBuffers(1, &skirtIbo);
+        }
         glBindVertexArray(skirtVao);
         glBindBuffer(GL_ARRAY_BUFFER, skirtVbo);
         glBufferData(GL_ARRAY_BUFFER, sv.size() * sizeof(float), sv.data(),
@@ -3125,7 +3144,8 @@ int main(int argc, char** argv)
         glEnableVertexAttribArray(0);
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
         glBindVertexArray(0);
-    }
+    };
+    build_skirt();
 
     // camera + editor state
     float yaw = 0.0f, pitch = -0.42f, fov = 55.0f;
@@ -3576,6 +3596,9 @@ int main(int argc, char** argv)
 
         // live ground-AO pass: blades top-down into the AO map
         {
+            build_topdown();   // the map may have grown since last frame
+            if (skirtHalf != TER_HALF || skirtGrid != GRID_N)
+                build_skirt();
             glBindFramebuffer(GL_FRAMEBUFFER, aoFbo);
             glViewport(0, 0, AO_N, AO_N);
             glDisable(GL_DEPTH_TEST);
