@@ -1418,16 +1418,16 @@ struct GenParams {
     float flatSize = 0.20f;  // clearing radius, fraction of island radius
     float flatFlat = 1.0f;   // how completely a clearing is levelled
     bool  paths = true;      // trails linking the clearings and the shore
-    float pathWidth = 2.6f;  // world units
+    float pathWidth = 1.9f;  // world units
     float pathWander = 0.77f;
     float pathCut = 0.76f;   // how firmly a trail levels the ground it crosses
     float pathGrade = 0.56f; // steepest climb a trail will accept
-    float pathBank = 1.0f;   // slope of the cut/fill banks beside the tread
+    float pathBank = 3.0f;   // slope of the cut/fill banks beside the tread
     float pathCling = 0.28f;  // 0 = cut across the terrain, 1 = wind around it
     bool  pathPaint = true;  // lay dirt (and clear grass) along the trails
     int   pathLayer = 1;     // 0 = path dirt (brown), 1 = soft dirt (sand)
     bool  spiralRoad = true; // a road wrapping the terraces to the summit
-    float spiralTurn = 1.30f; // turns of the hill gained per terrace
+    float spiralTurn = 0.26f; // turns of the hill gained per terrace
     float spiralInset = 0.0f;// how far back from each drop the road sits
     float spiralHug = 0.5f;  // 0 = cut straight through risers, 1 = follow
                              // the terrace treads exactly
