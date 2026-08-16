@@ -2127,6 +2127,28 @@ static bool gShowWater = true;
 
 // Every quadrant is a slot on disk under the editor, so islands persist
 // between sessions and switching cells always has somewhere to save to.
+// Whether the open map has anything in it: browsing quadrants should not
+// litter the chart with blank islands, so only sculpted or painted work
+// claims a slot.
+static bool map_has_content()
+{
+    if (!gProps.empty())
+        return true;
+    for (float h : gHeights)
+        if (fabsf(h) > 0.001f)
+            return true;
+    for (Uint8 v : gMask)
+        if (v)
+            return true;
+    for (Uint8 v : gMask2)
+        if (v)
+            return true;
+    for (Uint8 v : gKill)
+        if (v != 255)
+            return true;
+    return false;
+}
+
 static std::string slot_path(int cx, int cy)
 {
     std::string dir = std::string(SDL_GetBasePath()) + "islands";
@@ -2167,9 +2189,8 @@ static bool load_world(const char* path)
     FILE* f = fopen(path, "rb");
     if (!f)
         return false;
-    for (int y = 0; y < WORLD_MAX; y++)
-        for (int x = 0; x < WORLD_MAX; x++)
-            gWorldCells[y][x].clear();
+    // merge rather than replace: a chart that only mentions one quadrant
+    // should not wipe the islands sitting in the others
     char line[1200];
     while (fgets(line, sizeof line, f)) {
         int x, y, n;
@@ -2920,7 +2941,24 @@ int main(int argc, char** argv)
             save_world(p.c_str());
         } else if (gDialogAction == 5) {
             gDialogAction = 0;
-            load_world(gDialogFile);
+            if (load_world(gDialogFile)) {
+                // a chart on its own changes nothing on screen: open the
+                // island of whichever quadrant it says we were editing
+                const std::string& cur =
+                    gWorldCells[gWorldSel[1]][gWorldSel[0]];
+                if (!cur.empty() && load_map(cur.c_str()))
+                    applySettingsIn();
+                else if (cur.empty())
+                    new_map();
+                rebuild_terrain_mesh();
+                rebuild_grass_instances();
+                glBindBuffer(GL_ARRAY_BUFFER, instVbo);
+                glBufferData(GL_ARRAY_BUFFER, inst.size() * sizeof(float),
+                             inst.data(), GL_STATIC_DRAW);
+                glBindBuffer(GL_ARRAY_BUFFER, 0);
+                gMapResized = false;
+                save_world(editor_chart_path().c_str());
+            }
         }
 
         ImGui_ImplOpenGL3_NewFrame();
@@ -3839,38 +3877,26 @@ int main(int argc, char** argv)
                                 // switching quadrants saves what is open,
                                 // then opens that cell's island -- or a
                                 // clean slate when the cell is empty
-                                if (gWorldCells[gWorldSel[1]][gWorldSel[0]].empty())
-                                    gWorldCells[gWorldSel[1]][gWorldSel[0]] =
-                                        slot_path(gWorldSel[0], gWorldSel[1]);
-                                const std::string& cur =
-                                    gWorldCells[gWorldSel[1]][gWorldSel[0]];
-                                if (!cur.empty() &&
-                                    (gWorldSel[0] != cx || gWorldSel[1] != cy)) {
+                                if ((gWorldSel[0] != cx || gWorldSel[1] != cy) &&
+                                    map_has_content()) {
+                                    if (gWorldCells[gWorldSel[1]][gWorldSel[0]].empty())
+                                        gWorldCells[gWorldSel[1]][gWorldSel[0]] =
+                                            slot_path(gWorldSel[0], gWorldSel[1]);
                                     syncSettingsOut();
-                                    save_map(cur.c_str());
+                                    save_map(gWorldCells[gWorldSel[1]]
+                                                        [gWorldSel[0]].c_str());
                                 }
                                 gWorldSel[0] = cx;
                                 gWorldSel[1] = cy;
-                                std::string nxt = gWorldCells[cy][cx];
-                                if (nxt.empty()) {
-                                    // an untouched quadrant still gets a
-                                    // file, so what you sculpt here is
-                                    // saved when you move on
-                                    nxt = slot_path(cx, cy);
-                                    if (std::filesystem::exists(nxt)) {
-                                        gWorldCells[cy][cx] = nxt;
-                                    } else {
-                                        new_map();
-                                        gWorldCells[cy][cx] = nxt;
-                                        syncSettingsOut();
-                                        save_map(nxt.c_str());
-                                        save_world(editor_chart_path().c_str());
-                                        nxt.clear();
-                                    }
-                                }
+                                // open the island living here, or a clean
+                                // slate -- an empty cell stays empty until
+                                // there is something to keep
+                                const std::string nxt = gWorldCells[cy][cx];
                                 if (!nxt.empty()) {
                                     if (load_map(nxt.c_str()))
                                         applySettingsIn();
+                                } else {
+                                    new_map();
                                 }
                                 save_world(editor_chart_path().c_str());
                                 rebuild_terrain_mesh();
