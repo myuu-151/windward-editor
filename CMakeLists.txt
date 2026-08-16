@@ -47,4 +47,4 @@ if(MSVC)
 endif()
 
 # glb import for custom props
-target_include_directories(terrain PRIVATE third_party/cgltf)
+target_include_directories(terrain PRIVATE third_party/cgltf third_party/stb)

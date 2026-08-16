@@ -35,6 +35,8 @@
 #include <vector>
 #define CGLTF_IMPLEMENTATION
 #include "cgltf.h"
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
 
 // World extent and resolutions. These scale together: a bigger island
 // gets proportionally more height samples, mask texels, mesh quads and
@@ -3036,6 +3038,100 @@ static void gen_landmarks(float seaLevel)
 // registers it under an "Imported" category. Colour comes from each
 // material's base-colour factor; textures are not unpacked yet, so a
 // textured model arrives in its flat material colours.
+// A glb carries its images inside it (or beside it), so a material's base
+// colour map can be unpacked and bound like any pack texture -- the props
+// then show up with their real materials rather than flat colours, and
+// the same Trunk/Leaves style overrides apply to them.
+static unsigned glb_texture(const cgltf_image* img, const std::string& dir)
+{
+    if (!img)
+        return 0;
+    std::vector<unsigned char> file;
+    const unsigned char* bytes = nullptr;
+    size_t len = 0;
+    if (img->buffer_view && img->buffer_view->buffer &&
+        img->buffer_view->buffer->data) {
+        bytes = (const unsigned char*)img->buffer_view->buffer->data +
+                img->buffer_view->offset;
+        len = img->buffer_view->size;
+    } else if (img->uri && strncmp(img->uri, "data:", 5) != 0) {
+        std::string up = dir + "/" + img->uri;
+        FILE* tf = fopen(up.c_str(), "rb");
+        if (!tf)
+            return 0;
+        fseek(tf, 0, SEEK_END);
+        file.resize((size_t)ftell(tf));
+        fseek(tf, 0, SEEK_SET);
+        if (fread(file.data(), 1, file.size(), tf) != file.size()) {
+            fclose(tf);
+            return 0;
+        }
+        fclose(tf);
+        bytes = file.data();
+        len = file.size();
+    }
+    if (!bytes || !len)
+        return 0;
+    int w = 0, h = 0, ch = 0;
+    stbi_uc* px = stbi_load_from_memory(bytes, (int)len, &w, &h, &ch, 4);
+    if (!px)
+        return 0;
+    unsigned tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, px);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                    GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    stbi_image_free(px);
+    return tex;
+}
+
+static bool import_glb(const std::string& path);
+
+// A .blend is Blender's own working format -- there is no reading it from
+// outside. Blender itself will convert one though, so this runs it in the
+// background to export a glb beside the editor and imports that, which
+// also means the model arrives with the materials Blender assigned.
+static bool import_blend(const std::string& path)
+{
+    std::string blender;
+    const char* env = SDL_getenv("BLENDER");
+    if (env && *env) {
+        blender = env;
+    } else {
+        const char* guesses[] = {
+            "C:/Program Files/Blender Foundation/Blender 5.0/blender.exe",
+            "C:/Program Files/Blender Foundation/Blender 4.2/blender.exe",
+            "C:/Program Files/Blender Foundation/Blender 4.0/blender.exe",
+        };
+        for (const char* g : guesses)
+            if (std::filesystem::exists(g)) { blender = g; break; }
+    }
+    if (blender.empty()) {
+        SDL_Log("import: no blender.exe found -- set BLENDER to its path");
+        return false;
+    }
+    const std::string out = std::string(SDL_GetBasePath()) + "blend_import.glb";
+    char cmd[2048];
+    SDL_snprintf(cmd, sizeof cmd,
+                 "\"\"%s\" -b \"%s\" --python-expr \"import bpy;"
+                 "bpy.ops.export_scene.gltf(filepath=r'%s',"
+                 "export_format='GLB',export_apply=True)\"\"",
+                 blender.c_str(), path.c_str(), out.c_str());
+    SDL_Log("import: converting %s via blender...", path.c_str());
+    const int rc = system(cmd);
+    if (rc != 0 || !std::filesystem::exists(out)) {
+        SDL_Log("import: blender conversion failed (%d)", rc);
+        return false;
+    }
+    return import_glb(out);
+}
+
 static bool import_glb(const std::string& path)
 {
     cgltf_options opt{};
@@ -3047,6 +3143,12 @@ static bool import_glb(const std::string& path)
         return false;
     }
 
+    std::unordered_map<const cgltf_image*, unsigned> texCache;
+    std::string dir = path;
+    {
+        size_t a = dir.find_last_of("/\\");
+        dir = a == std::string::npos ? std::string(".") : dir.substr(0, a);
+    }
     PropMesh m;
     m.category = "Imported";
     {
@@ -3082,14 +3184,31 @@ static bool import_glb(const std::string& path)
             PropMaterial mat;
             mat.name = m.label;
             if (pr.material && pr.material->has_pbr_metallic_roughness) {
-                const float* bc =
-                    pr.material->pbr_metallic_roughness.base_color_factor;
+                const cgltf_pbr_metallic_roughness& pbr =
+                    pr.material->pbr_metallic_roughness;
+                const float* bc = pbr.base_color_factor;
                 for (int k = 0; k < 3; k++) {
                     mat.kd[k] = bc[k];
                     mat.ka[k] = bc[k] * 0.72f;   // a little darker underneath
                 }
                 if (pr.material->name)
                     mat.name = pr.material->name;
+                if (pbr.base_color_texture.texture) {
+                    const cgltf_image* im = pbr.base_color_texture.texture->image;
+                    auto it = texCache.find(im);
+                    if (it == texCache.end()) {
+                        const unsigned t = glb_texture(im, dir);
+                        texCache[im] = t;
+                        mat.tex = t;
+                    } else {
+                        mat.tex = it->second;
+                    }
+                    if (mat.tex) {
+                        // the texture carries the colour; the factor is a
+                        // tint on top of it, which is usually white
+                        mat.texName = im && im->uri ? im->uri : mat.name;
+                    }
+                }
             }
             const int matIdx = (int)m.mats.size();
             m.mats.push_back(mat);
@@ -3757,6 +3876,9 @@ static const SDL_DialogFileFilter kMapFilters[] = {
 };
 static const SDL_DialogFileFilter kGlbFilters[] = {
     { "glTF binary", "glb" },
+};
+static const SDL_DialogFileFilter kBlendFilters[] = {
+    { "Blender file", "blend" },
 };
 static const SDL_DialogFileFilter kWorldFilters[] = {
     { "Windward world", "wworld" },
@@ -4709,6 +4831,10 @@ int main(int argc, char** argv)
         } else if (gDialogAction == 6) {
             gDialogAction = 0;
             if (!import_glb(gDialogFile))
+                SDL_Log("could not import %s", gDialogFile);
+        } else if (gDialogAction == 7) {
+            gDialogAction = 0;
+            if (!import_blend(gDialogFile))
                 SDL_Log("could not import %s", gDialogFile);
         } else if (gDialogAction == 5) {
             gDialogAction = 0;
@@ -5898,6 +6024,17 @@ int main(int argc, char** argv)
                             "material's base colour; textures are not "
                             "unpacked yet, so a textured model arrives "
                             "flat-shaded.");
+                    ImGui::SameLine();
+                    if (ImGui::Button("Import .blend..."))
+                        SDL_ShowOpenFileDialog(map_dialog_cb, (void*)7, win,
+                                               kBlendFilters, 1, nullptr,
+                                               false);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip(
+                            "Runs Blender in the background to convert the "
+                            "file, then imports it.\nNeeds Blender "
+                            "installed; set the BLENDER environment "
+                            "variable if it is somewhere unusual.");
                     ImGui::Separator();
                     ImGui::RadioButton("Place", &propTool, 0);
                     ImGui::SameLine();
