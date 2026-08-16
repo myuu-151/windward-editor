@@ -992,6 +992,22 @@ static bool gMapResized = false;   // a load changed the world size
 // Resize the world: resample every layer into the new resolution so the
 // island scales with the map instead of being lost. Called from the Map
 // tab and when a map with a different size is loaded.
+// Empty slate for a quadrant with nothing in it yet: flat ground at sea
+// level, no paint, no props, so a new island starts clean.
+static void new_map()
+{
+    std::fill(gHeights.begin(), gHeights.end(), 0.0f);
+    std::fill(gMask.begin(), gMask.end(), (Uint8)0);
+    std::fill(gMask2.begin(), gMask2.end(), (Uint8)0);
+    std::fill(gKill.begin(), gKill.end(), (Uint8)255);
+    gProps.clear();
+    gShoreBase.clear();
+    gUndoStack.clear();
+    gRedoStack.clear();
+    mark_all_dirty();
+    SDL_Log("new island");
+}
+
 static void resize_map(float newHalf)
 {
     int nGrid, nHN, nMask, nGrass;
@@ -2106,6 +2122,7 @@ static const int WORLD_MAX = 8;
 static int gWorldSize = 7;               // Wind Waker's chart is 7x7
 static std::string gWorldCells[WORLD_MAX][WORLD_MAX];
 static int gWorldSel[2] = { 0, 0 };
+static int gTestCell[2] = { 1, 0 };   // built-in test island quadrant
 static bool gShowWater = true;
 
 static void save_world(const char* path)
@@ -2117,6 +2134,7 @@ static void save_world(const char* path)
     }
     fprintf(f, "wworld 1\nsize %d\nloop 1\nwaterline %f\n", gWorldSize,
             gWaterline);
+    fprintf(f, "testisland %d %d\n", gTestCell[0], gTestCell[1]);
     for (int y = 0; y < gWorldSize; y++)
         for (int x = 0; x < gWorldSize; x++)
             if (!gWorldCells[y][x].empty())
@@ -2143,6 +2161,10 @@ static bool load_world(const char* path)
             gWorldSize = SDL_clamp(n, 2, WORLD_MAX);
         else if (sscanf(line, "waterline %f", &wl) == 1)
             gWaterline = wl;
+        else if (sscanf(line, "testisland %d %d", &x, &y) == 2) {
+            gTestCell[0] = x;
+            gTestCell[1] = y;
+        }
         else if (sscanf(line, "cell %d %d %1023[^\n]", &x, &y, p) == 3)
             if (x >= 0 && x < WORLD_MAX && y >= 0 && y < WORLD_MAX)
                 gWorldCells[y][x] = p;
@@ -3782,8 +3804,33 @@ int main(int argc, char** argv)
                             ImGui::PushStyleColor(ImGuiCol_Button, c);
                             ImGui::PushID(cy * WORLD_MAX + cx);
                             if (ImGui::Button(lbl, ImVec2(cellPx, cellPx))) {
+                                // switching quadrants saves what is open,
+                                // then opens that cell's island -- or a
+                                // clean slate when the cell is empty
+                                const std::string& cur =
+                                    gWorldCells[gWorldSel[1]][gWorldSel[0]];
+                                if (!cur.empty() &&
+                                    (gWorldSel[0] != cx || gWorldSel[1] != cy)) {
+                                    syncSettingsOut();
+                                    save_map(cur.c_str());
+                                }
                                 gWorldSel[0] = cx;
                                 gWorldSel[1] = cy;
+                                const std::string& nxt = gWorldCells[cy][cx];
+                                if (!nxt.empty()) {
+                                    if (load_map(nxt.c_str()))
+                                        applySettingsIn();
+                                } else {
+                                    new_map();
+                                }
+                                rebuild_terrain_mesh();
+                                rebuild_grass_instances();
+                                glBindBuffer(GL_ARRAY_BUFFER, instVbo);
+                                glBufferData(GL_ARRAY_BUFFER,
+                                             inst.size() * sizeof(float),
+                                             inst.data(), GL_STATIC_DRAW);
+                                glBindBuffer(GL_ARRAY_BUFFER, 0);
+                                gMapResized = false;
                             }
                             if (has && ImGui::IsItemHovered()) {
                                 std::string n = gWorldCells[cy][cx];
