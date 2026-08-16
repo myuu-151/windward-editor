@@ -1418,17 +1418,19 @@ struct GenParams {
     float flatSize = 0.20f;  // clearing radius, fraction of island radius
     float flatFlat = 1.0f;   // how completely a clearing is levelled
     bool  paths = true;      // trails linking the clearings and the shore
-    float pathWidth = 1.9f;  // world units
+    float pathWidth = 2.6f;  // world units
     float pathWander = 0.77f;
     float pathCut = 0.76f;   // how firmly a trail levels the ground it crosses
     float pathGrade = 0.56f; // steepest climb a trail will accept
-    float pathBank = 3.0f;   // slope of the cut/fill banks beside the tread
+    float pathBank = 1.0f;   // slope of the cut/fill banks beside the tread
     float pathCling = 0.28f;  // 0 = cut across the terrain, 1 = wind around it
     bool  pathPaint = true;  // lay dirt (and clear grass) along the trails
     int   pathLayer = 1;     // 0 = path dirt (brown), 1 = soft dirt (sand)
     bool  spiralRoad = true; // a road wrapping the terraces to the summit
-    float spiralTurn = 0.26f; // turns of the hill gained per terrace
+    float spiralTurn = 1.30f; // turns of the hill gained per terrace
     float spiralInset = 0.0f;// how far back from each drop the road sits
+    float spiralHug = 0.5f;  // 0 = cut straight through risers, 1 = follow
+                             // the terrace treads exactly
     bool  shorePath = false;  // run one trail down to a landing beach
     bool  summitPath = true; // and one up to the island's high point
     bool  add = false;       // layer over the existing sculpt
@@ -1990,7 +1992,13 @@ static void gen_carve_paths(float seaLevel)
                 float z = -TER_HALF + 2.0f * TER_HALF * j / (SN - 1);
                 sm[(size_t)j * SN + i] = height_at(x, z);
             }
-        for (int pass = 0; pass < 8; pass++) {
+        // How much the terrain is smoothed before the contour is read
+        // IS the road's character: unsmoothed, every riser is vertical
+        // and the road clings to the treads and the rock face; heavily
+        // smoothed, risers become slopes and the road cuts across them.
+        const float hug = SDL_clamp(gGen.spiralHug, 0.0f, 1.0f);
+        const int passes = (int)((1.0f - hug) * 16.0f + 0.5f);
+        for (int pass = 0; pass < passes; pass++) {
             std::vector<float> t = sm;
             for (int j = 1; j < SN - 1; j++)
                 for (int i = 1; i < SN - 1; i++)
@@ -2992,6 +3000,7 @@ struct TuneBlob {
     int   genSpiral = GenParams().spiralRoad ? 1 : 0;
     float genSpiralTurn = GenParams().spiralTurn;
     float genSpiralInset = GenParams().spiralInset;
+    float genSpiralHug = GenParams().spiralHug;
     float genFlatSize = GenParams().flatSize;
     float genFlatFlat = GenParams().flatFlat;
     float genPathWidth = GenParams().pathWidth;
@@ -3306,6 +3315,10 @@ int main(int argc, char** argv)
         genShot = true;
         if (argc >= 4)
             gGen.seed = SDL_atoi(argv[3]);
+        if (argc >= 5)   // sweep the road-hug control from the shell
+            gGen.spiralHug = (float)SDL_atof(argv[4]);
+        if (argc >= 6)
+            gGen.spiralTurn = (float)SDL_atof(argv[5]);
     }
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
@@ -3973,6 +3986,7 @@ int main(int argc, char** argv)
         gTune.genSpiral = gGen.spiralRoad ? 1 : 0;
         gTune.genSpiralTurn = gGen.spiralTurn;
         gTune.genSpiralInset = gGen.spiralInset;
+        gTune.genSpiralHug = gGen.spiralHug;
         memset(gTune.propSelId, 0, sizeof gTune.propSelId);
         if (propSel >= 0 && propSel < (int)gPropMeshes.size())
             SDL_strlcpy(gTune.propSelId,
@@ -5032,6 +5046,17 @@ int main(int argc, char** argv)
                                 genDirty |= ImGui::SliderFloat(
                                     "Road Inset", &gGen.spiralInset,
                                     0.0f, 5.0f, "%.2f");
+                                genDirty |= ImGui::SliderFloat(
+                                    "Road Hugs Terraces", &gGen.spiralHug,
+                                    0.0f, 1.0f, "%.2f");
+                                if (ImGui::IsItemHovered())
+                                    ImGui::SetTooltip(
+                                        "1: follows the terrace treads and "
+                                        "the rock faces exactly.\n0: reads "
+                                        "the hill as smooth slopes and cuts "
+                                        "the road across the risers.\n"
+                                        "Separate from Cling to Terrain, "
+                                        "which steers the routed trails.");
                             }
                             genDirty |= ImGui::SliderFloat("Cling to Terrain",
                                                            &gGen.pathCling,
