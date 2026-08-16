@@ -1376,33 +1376,34 @@ static void apply_shoreline(float seaLevel)
 // way the shoreline does, so nothing compounds and nothing is destroyed
 // until you bake it.
 struct GenParams {
-    int   seed = 1337;
-    float size = 0.62f;      // island radius, fraction of the map half
-    float coast = 0.38f;     // width of the falloff into the sea
-    float lumps = 0.45f;     // how much the coastline radius wanders
-    float warp = 0.5f;       // domain warp: bends the whole shape organic
-    float height = 8.0f;     // peak land height in world units
-    float rough = 0.55f;     // terrain noise vs a smooth dome
-    int   detail = 5;        // fbm octaves
-    float fscale = 3.2f;     // feature frequency
+    int   seed = 19430;
+    float size = 1.07f;      // island radius, fraction of the map half
+    float coast = 0.05f;     // width of the falloff into the sea
+    float lumps = 0.24f;     // how much the coastline radius wanders
+    float warp = 0.47f;      // domain warp: bends the whole shape organic
+    float height = 14.3f;    // peak land height in world units
+    float rough = 0.44f;     // terrain noise vs a smooth dome
+    int   detail = 3;        // fbm octaves
+    float fscale = 1.48f;    // feature frequency
     float ridge = 0.3f;      // billowy blobs .. sharp mountain spines
     int   peaks = 2;         // seeded summits on top of the noise
-    float peakH = 0.7f;
+    float peakH = 0.84f;
     float peakSpread = 0.5f; // how far the summits sit from the centre
-    float plateau = 0.0f;    // soft ceiling: mesa tops
-    float terr = 0.0f;       // terrace step height, 0 = off
-    float beach = 0.3f;      // widens the gentle land near the water
+    float plateau = 0.46f;   // soft ceiling: mesa tops
+    float terr = 2.1f;       // terrace step height, 0 = off
+    float beach = 0.31f;     // widens the gentle land near the water
     float drop = 2.0f;       // sea floor depth outside the island
     // ---- level layout: the parts that make an island playable rather
     // ---- than just scenery
-    int   flats = 3;         // flat clearings to build on
+    int   flats = 2;         // flat clearings to build on
     float flatSize = 0.20f;  // clearing radius, fraction of island radius
-    float flatFlat = 0.9f;   // how completely a clearing is levelled
+    float flatFlat = 1.0f;   // how completely a clearing is levelled
     bool  paths = true;      // trails linking the clearings and the shore
-    float pathWidth = 2.2f;  // world units
-    float pathWander = 0.5f;
-    float pathCut = 0.85f;   // how firmly a trail levels the ground it crosses
-    float pathGrade = 0.30f; // steepest climb a trail will accept
+    float pathWidth = 2.5f;  // world units
+    float pathWander = 0.02f;
+    float pathCut = 0.73f;   // how firmly a trail levels the ground it crosses
+    float pathGrade = 0.31f; // steepest climb a trail will accept
+    float pathBank = 0.9f;   // slope of the cut/fill banks beside the tread
     bool  pathPaint = true;  // lay dirt (and clear grass) along the trails
     bool  shorePath = true;  // run one trail down to a landing beach
     bool  add = false;       // layer over the existing sculpt
@@ -1559,8 +1560,12 @@ static float gen_land(float u, float v, float* maskOut)
 // grade it costs. Below the grade limit slope is nearly free, past it the
 // price climbs steeply -- which is what makes routes hug contours and
 // switchback up a hillside instead of charging over the top.
+// toShore: ignore the target and instead run to whichever piece of
+// coastline is cheapest to reach, which is how a trail finds the gentle
+// side of an island rather than falling off the steep one
 static bool gen_route(float ax, float az, float bx, float bz, float seaLevel,
-                      std::vector<float>& outX, std::vector<float>& outZ)
+                      std::vector<float>& outX, std::vector<float>& outZ,
+                      bool toShore = false)
 {
     const int N = SDL_clamp(HN / 4, 48, 160);
     const float span = 2.0f * TER_HALF;
@@ -1570,29 +1575,79 @@ static bool gen_route(float ax, float az, float bx, float bz, float seaLevel,
         return SDL_clamp((int)((w + TER_HALF) / span * (N - 1) + 0.5f),
                          0, N - 1);
     };
-    std::vector<float> h((size_t)N * N);
+    std::vector<float> raw((size_t)N * N);
     for (int j = 0; j < N; j++)
         for (int i = 0; i < N; i++)
-            h[idx(i, j)] = height_at(wpos(i), wpos(j));
+            raw[idx(i, j)] = height_at(wpos(i), wpos(j));
+
+    // Route over a SMOOTHED copy of the terrain. On terraced ground the
+    // real heightfield is flat-or-wall, so a router reading it directly
+    // finds every step impassable and runs along the rims forever looking
+    // for a way round -- which is exactly what it did. Smoothing turns
+    // each step back into the slope it stands for, so the route crosses
+    // where the underlying ground is shallowest and the carve cuts the
+    // ramp there.
+    std::vector<float> h = raw;
+    for (int pass = 0; pass < 6; pass++) {
+        std::vector<float> t = h;
+        for (int j = 1; j < N - 1; j++)
+            for (int i = 1; i < N - 1; i++)
+                h[idx(i, j)] = (t[idx(i, j)] * 4.0f +
+                                t[idx(i - 1, j)] + t[idx(i + 1, j)] +
+                                t[idx(i, j - 1)] + t[idx(i, j + 1)]) * 0.125f;
+    }
+    // local ruggedness: how broken the ground is around each node, so
+    // trails keep a little clearance from cliff edges instead of riding
+    // along the very lip of one
+    std::vector<float> rough((size_t)N * N, 0.0f);
+    for (int j = 1; j < N - 1; j++)
+        for (int i = 1; i < N - 1; i++) {
+            float c = raw[idx(i, j)];
+            float m = 0.0f;
+            for (int dj = -1; dj <= 1; dj++)
+                for (int di = -1; di <= 1; di++)
+                    m = SDL_max(m, fabsf(raw[idx(i + di, j + dj)] - c));
+            rough[idx(i, j)] = m;
+        }
 
     const float cell = span / (N - 1);
     const float maxG = SDL_max(0.02f, gGen.pathGrade);
     std::vector<float> dist((size_t)N * N, 1e30f);
     std::vector<int> prev((size_t)N * N, -1);
     int si = toGrid(ax), sj = toGrid(az), ti = toGrid(bx), tj = toGrid(bz);
+    // shoreline nodes: land with open water next door
+    std::vector<char> isShore((size_t)N * N, 0);
+    if (toShore) {
+        for (int j = 1; j < N - 1; j++)
+            for (int i = 1; i < N - 1; i++) {
+                if (raw[idx(i, j)] <= seaLevel + 0.2f)
+                    continue;
+                if (raw[idx(i - 1, j)] <= seaLevel + 0.2f ||
+                    raw[idx(i + 1, j)] <= seaLevel + 0.2f ||
+                    raw[idx(i, j - 1)] <= seaLevel + 0.2f ||
+                    raw[idx(i, j + 1)] <= seaLevel + 0.2f)
+                    isShore[idx(i, j)] = 1;
+            }
+    }
     typedef std::pair<float, int> QE;
     std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
     dist[idx(si, sj)] = 0.0f;
     pq.push({ 0.0f, (int)idx(si, sj) });
-    const int goal = (int)idx(ti, tj);
+    int goal = (int)idx(ti, tj);
     while (!pq.empty()) {
         QE top = pq.top();
         pq.pop();
         int cur = top.second;
         if (top.first > dist[cur] + 0.0001f)
             continue;
-        if (cur == goal)
+        if (toShore) {
+            if (isShore[cur]) {   // first shore reached is the cheapest
+                goal = cur;
+                break;
+            }
+        } else if (cur == goal) {
             break;
+        }
         int ci = cur % N, cj = cur / N;
         for (int dj = -1; dj <= 1; dj++)
             for (int di = -1; di <= 1; di++) {
@@ -1605,11 +1660,21 @@ static bool gen_route(float ax, float az, float bx, float bz, float seaLevel,
                 float dh = h[idx(ni, nj)] - h[idx(ci, cj)];
                 float grade = fabsf(dh) / d;
                 float c = d;
+                // Steepness is priced, but the price is CAPPED. Without a
+                // cap one steep step costs more than a detour of any
+                // length, which is what produced the long sweeping arcs
+                // that never got anywhere.
                 float over = grade / maxG;
-                c *= 1.0f + over * over * 1.5f;
-                if (over > 1.0f)
-                    c *= 1.0f + (over - 1.0f) * 12.0f;   // effectively a wall
-                if (h[idx(ni, nj)] < seaLevel + 0.2f)
+                float pen = 1.0f + over * over * 2.0f;
+                c *= SDL_min(pen, 30.0f);
+                // climbing costs by how much height it gains, not just how
+                // steeply -- so a route prefers to gain its height once
+                // rather than repeatedly rolling over ridges
+                if (dh > 0.0f)
+                    c += dh * 1.6f;
+                // keep off cliff lips
+                c += SDL_min(rough[idx(ni, nj)], 6.0f) * cell * 0.9f;
+                if (raw[idx(ni, nj)] < seaLevel + 0.2f)
                     c += span * 4.0f;                    // stay on land
                 size_t nk = idx(ni, nj);
                 if (dist[cur] + c < dist[nk]) {
@@ -1664,24 +1729,14 @@ static void gen_carve_paths(float seaLevel)
         nodes.push_back({ f.u * TER_HALF, f.v * TER_HALF });
     if (nodes.size() < 2 && !g.shorePath)
         return;
-    if (g.shorePath) {
-        // walk outward from the last clearing until the land runs out,
-        // and land the trail on that beach
-        float ax = nodes.empty() ? 0.0f : nodes.back().x;
-        float az = nodes.empty() ? 0.0f : nodes.back().z;
-        float len = sqrtf(ax * ax + az * az);
-        float dx = len > 0.001f ? ax / len : 1.0f;
-        float dz = len > 0.001f ? az / len : 0.0f;
-        float bestX = ax, bestZ = az;
-        for (float r = len; r < TER_HALF * 1.5f; r += TER_HALF * 0.01f) {
-            float x = dx * r, z = dz * r;
-            if (fabsf(x) > TER_HALF || fabsf(z) > TER_HALF)
-                break;
-            if (height_at(x, z) <= seaLevel + 0.15f)
-                break;
-            bestX = x; bestZ = z;
-        }
-        nodes.push_back({ bestX, bestZ });
+    if (g.shorePath && !nodes.empty()) {
+        // let the router choose the landing: the cheapest coastline to
+        // walk to, rather than whatever lies straight outward -- which
+        // was as likely to be the island's steepest face as its beach
+        std::vector<float> sx, sz;
+        if (gen_route(nodes.back().x, nodes.back().z, 0.0f, 0.0f, seaLevel,
+                      sx, sz, true) && !sx.empty())
+            nodes.push_back({ sx.back(), sz.back() });
     }
     if (nodes.size() < 2)
         return;
@@ -1739,33 +1794,83 @@ static void gen_carve_paths(float seaLevel)
             ptz[i] = SDL_clamp(z, -TER_HALF + cell, TER_HALF - cell);
             pth[i] = height_at(ptx[i], ptz[i]);
         }
-        // ease the profile into a walkable grade. The route already keeps
-        // to gentle ground, so this only takes the steps out rather than
-        // dragging the trail away from the land it was routed along.
-        for (int pass = 0; pass < 8; pass++) {
-            std::vector<float> t = pth;
-            for (int i = 1; i < steps; i++)
-                pth[i] = (t[i - 1] + 2.0f * t[i] + t[i + 1]) * 0.25f;
+        // Grade-limit the profile instead of smoothing it. Averaging a
+        // staircase gives a straight ramp, which then has to cut deep
+        // into every tread and pile fill over every riser -- that is what
+        // tore the scar across the terraces. Limiting slope from both
+        // ends keeps flat ground exactly flat and only lowers the trail
+        // where the climb is genuinely too steep, so a terraced hillside
+        // gets its treads left alone and a notch cut through each riser.
+        // Taking the minimum also means the trail never floats above the
+        // land: it cuts in, the way a worn path does.
+        {
+            float ds = total / steps;
+            float maxRise = SDL_max(0.02f, g.pathGrade) * ds;
+            for (int pass = 0; pass < 2; pass++) {
+                for (int i = 1; i <= steps; i++)
+                    pth[i] = SDL_min(pth[i], pth[i - 1] + maxRise);
+                for (int i = steps - 1; i >= 0; i--)
+                    pth[i] = SDL_min(pth[i], pth[i + 1] + maxRise);
+            }
+            // round the corners where cuts begin and end
+            for (int pass = 0; pass < 2; pass++) {
+                std::vector<float> t = pth;
+                for (int i = 1; i < steps; i++)
+                    pth[i] = (t[i - 1] + 2.0f * t[i] + t[i + 1]) * 0.25f;
+            }
         }
 
         for (int i = 0; i <= steps; i++) {
             float cx = ptx[i], cz = ptz[i], ch = pth[i];
-            // carve the corridor toward the trail height
-            int i0 = SDL_clamp((int)((cx - halfW * 1.6f + TER_HALF) / cell), 0, HN - 1);
-            int i1 = SDL_clamp((int)((cx + halfW * 1.6f + TER_HALF) / cell) + 1, 0, HN - 1);
-            int j0 = SDL_clamp((int)((cz - halfW * 1.6f + TER_HALF) / cell), 0, HN - 1);
-            int j1 = SDL_clamp((int)((cz + halfW * 1.6f + TER_HALF) / cell) + 1, 0, HN - 1);
+            // Cut a bench, not a dip. A path reads as a path because it
+            // has a FLAT tread of constant width, with the ground cut
+            // away on the uphill side and filled on the downhill one --
+            // easing the terrain toward the trail height across the whole
+            // corridor just makes a soft trough that still rolls with the
+            // land. Tread is levelled outright; the shoulder blends back
+            // into whatever the hillside was doing.
+            // Banks are a constant SLOPE, not a constant width: a bank of
+            // fixed width has to go vertical when the cut is deep, which
+            // is why a deep crossing came out as a landslide scar. Away
+            // from the tread the ground may only differ from the trail by
+            // what the bank angle allows at that distance, so a shallow
+            // cut barely touches the hillside and a deep one opens a wide
+            // batter -- the shape earthworks actually make.
+            const float bank = SDL_max(0.15f, g.pathBank);
+            // How far the earthworks reach is set by how deep this bit of
+            // trail actually cuts: probe the ground just off each side of
+            // the tread and give the batter only the width it needs to
+            // meet grade. A fixed reach flattens the whole hillside even
+            // where the trail is already sitting on the surface.
+            int pi = SDL_max(0, i - 1), ni2 = SDL_min(steps, i + 1);
+            float tgx = ptx[ni2] - ptx[pi], tgz = ptz[ni2] - ptz[pi];
+            float tl2 = SDL_max(0.0001f, sqrtf(tgx * tgx + tgz * tgz));
+            float nx = -tgz / tl2, nz = tgx / tl2;
+            float e1 = height_at(SDL_clamp(cx + nx * halfW, -TER_HALF, TER_HALF),
+                                 SDL_clamp(cz + nz * halfW, -TER_HALF, TER_HALF));
+            float e2 = height_at(SDL_clamp(cx - nx * halfW, -TER_HALF, TER_HALF),
+                                 SDL_clamp(cz - nz * halfW, -TER_HALF, TER_HALF));
+            float depth = SDL_max(fabsf(e1 - ch), fabsf(e2 - ch));
+            const float reach = halfW + SDL_min(10.0f, depth / bank);
+            int i0 = SDL_clamp((int)((cx - reach + TER_HALF) / cell), 0, HN - 1);
+            int i1 = SDL_clamp((int)((cx + reach + TER_HALF) / cell) + 1, 0, HN - 1);
+            int j0 = SDL_clamp((int)((cz - reach + TER_HALF) / cell), 0, HN - 1);
+            int j1 = SDL_clamp((int)((cz + reach + TER_HALF) / cell) + 1, 0, HN - 1);
             for (int j = j0; j <= j1; j++)
                 for (int ii = i0; ii <= i1; ii++) {
                     float x = -TER_HALF + ii * cell, z = -TER_HALF + j * cell;
-                    float d = sqrtf((x - cx) * (x - cx) + (z - cz) * (z - cz)) /
-                              (halfW * 1.6f);
-                    if (d >= 1.0f)
+                    float dd = sqrtf((x - cx) * (x - cx) + (z - cz) * (z - cz));
+                    if (dd >= reach)
                         continue;
-                    float w = 1.0f - SDL_clamp((d - 0.35f) / 0.65f, 0.0f, 1.0f);
-                    w = w * w * (3.0f - 2.0f * w);
                     float& h = gHeights[(size_t)j * HN + ii];
-                    h += (ch - h) * w * g.pathCut;
+                    float want;
+                    if (dd <= halfW) {
+                        want = ch;                       // the tread itself
+                    } else {
+                        float allow = (dd - halfW) * bank;
+                        want = SDL_clamp(h, ch - allow, ch + allow);
+                    }
+                    h += (want - h) * g.pathCut;
                 }
             if (!g.pathPaint)
                 continue;
@@ -2681,7 +2786,7 @@ struct TuneBlob {
     int   genFlats = 3, genPaths = 1, genPathPaint = 1, genShorePath = 1;
     float genFlatSize = 0.20f, genFlatFlat = 0.9f;
     float genPathWidth = 2.2f, genPathWander = 0.5f, genPathCut = 0.85f;
-    float genPathGrade = 0.30f;
+    float genPathGrade = 0.30f, genPathBank = 0.9f;
 };
 static TuneBlob gTune;
 static bool gLoadedTune = false;
@@ -2977,8 +3082,18 @@ static void stamp_demo_scene()
 int main(int argc, char** argv)
 {
     const char* shotPath = nullptr;
+    bool genShot = false;
     if (argc >= 3 && SDL_strcmp(argv[1], "--shot") == 0)
         shotPath = argv[2];
+    // --genshot <file.bmp> [seed]: run the island generator with the
+    // built-in defaults and photograph it from above. Trail routing is
+    // only judgeable from the top, and this keeps the judgement repeatable.
+    if (argc >= 3 && SDL_strcmp(argv[1], "--genshot") == 0) {
+        shotPath = argv[2];
+        genShot = true;
+        if (argc >= 4)
+            gGen.seed = SDL_atoi(argv[3]);
+    }
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
@@ -3638,6 +3753,7 @@ int main(int argc, char** argv)
         gTune.genPathWander = gGen.pathWander;
         gTune.genPathCut = gGen.pathCut;
         gTune.genPathGrade = gGen.pathGrade;
+        gTune.genPathBank = gGen.pathBank;
         memset(gTune.propSelId, 0, sizeof gTune.propSelId);
         if (propSel >= 0 && propSel < (int)gPropMeshes.size())
             SDL_strlcpy(gTune.propSelId,
@@ -3711,6 +3827,7 @@ int main(int argc, char** argv)
             gGen.pathWander = gTune.genPathWander;
             gGen.pathCut = gTune.genPathCut;
             gGen.pathGrade = gTune.genPathGrade;
+            gGen.pathBank = gTune.genPathBank;
             if (gTune.propSelId[0]) {
                 for (int mi = 0; mi < (int)gPropMeshes.size(); mi++)
                     if (mesh_id(gPropMeshes[mi]) == gTune.propSelId) {
@@ -3735,7 +3852,16 @@ int main(int argc, char** argv)
     char mapPath[600];
     SDL_snprintf(mapPath, sizeof mapPath, "%s../map.bin", SDL_GetBasePath());
 
-    if (shotPath) {
+    if (genShot) {
+        gGenBase = gHeights;
+        gGenMask = gMask; gGenMask2 = gMask2; gGenKill = gKill;
+        gGen.on = true;
+        apply_generator(gWaterline);
+        simTime = 7.0;
+        yaw = 0.0f;
+        pitch = -1.45f;            // very nearly straight down
+        camPos[0] = 0.0f; camPos[1] = TER_HALF * 2.05f; camPos[2] = 0.6f;
+    } else if (shotPath) {
         stamp_demo_scene();
         simTime = 7.0;
         yaw = 0.0f;
@@ -4677,6 +4803,14 @@ int main(int argc, char** argv)
                             genDirty |= ImGui::SliderFloat("Trail Cut",
                                                            &gGen.pathCut, 0.0f,
                                                            1.0f, "%.2f");
+                            genDirty |= ImGui::SliderFloat("Bank Slope",
+                                                           &gGen.pathBank,
+                                                           0.2f, 3.0f, "%.2f");
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip(
+                                    "Angle of the cut and fill either side "
+                                    "of the tread.\nLower spreads the "
+                                    "earthworks wider and gentler.");
                             genDirty |= ImGui::SliderFloat("Max Grade",
                                                            &gGen.pathGrade,
                                                            0.05f, 1.2f, "%.2f");
