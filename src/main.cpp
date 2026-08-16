@@ -1426,6 +1426,9 @@ struct GenParams {
     float pathCling = 1.0f;  // 0 = cut across the terrain, 1 = wind around it
     bool  pathPaint = true;  // lay dirt (and clear grass) along the trails
     int   pathLayer = 1;     // 0 = path dirt (brown), 1 = soft dirt (sand)
+    bool  spiralRoad = true; // a road wrapping the terraces to the summit
+    float spiralTurn = 0.45f; // turns of the hill gained per terrace
+    float spiralInset = 0.6f;// how far back from each drop the road sits
     bool  shorePath = true;  // run one trail down to a landing beach
     bool  summitPath = true; // and one up to the island's high point
     bool  add = false;       // layer over the existing sculpt
@@ -1799,19 +1802,11 @@ static void gen_carve_paths(float seaLevel)
     const float halfW = SDL_max(0.4f, g.pathWidth * 0.5f);
     const float so = g.seed * 0.7913f;
 
-    for (size_t n = 0; n + 1 < nodes.size(); n++) {
-        float ax = nodes[n].x, az = nodes[n].z;
-        float bx = nodes[n + 1].x, bz = nodes[n + 1].z;
-        float dx = bx - ax, dz = bz - az;
-        if (sqrtf(dx * dx + dz * dz) < cell * 2.0f)
-            continue;
-        // route it across the terrain; a straight line is only the
-        // fallback for when no walkable way exists at all
-        std::vector<float> rx, rz;
-        if (!gen_route(ax, az, bx, bz, seaLevel, rx, rz)) {
-            rx = { ax, bx };
-            rz = { az, bz };
-        }
+    // cut and paint one polyline, wherever it came from
+    auto carve_route = [&](const std::vector<float>& rx,
+                           const std::vector<float>& rz) {
+        if (rx.size() < 2)
+            return;
         // resample the route evenly so carving is uniform along it
         std::vector<float> cum(rx.size(), 0.0f);
         for (size_t k = 1; k < rx.size(); k++) {
@@ -1820,7 +1815,7 @@ static void gen_carve_paths(float seaLevel)
         }
         float total = cum.back();
         if (total < cell * 2.0f)
-            continue;
+            return;
         int steps = SDL_max(8, (int)(total / (cell * 0.5f)));
         std::vector<float> ptx(steps + 1), ptz(steps + 1), pth(steps + 1);
         size_t seg = 0;
@@ -1951,6 +1946,80 @@ static void gen_carve_paths(float seaLevel)
                     Uint8& k = gKill[(size_t)j * MASK_N + ii];
                     if (v > k) k = v;   // 255 = no blades
                 }
+        }
+    };
+
+    if (g.spiralRoad) {
+        // A road that wraps the hill cannot be asked for by routing from
+        // A to B: a router's whole job is to find the SHORT way, and a
+        // terrace road is deliberately the long one. So it is generated
+        // directly -- follow the contour of each terrace for part of a
+        // turn, step out and down onto the next, and keep going round.
+        float bestH = -1e9f, cx0 = 0.0f, cz0 = 0.0f;
+        for (int j = 0; j < HN; j++)
+            for (int i = 0; i < HN; i++) {
+                float hh = gHeights[(size_t)j * HN + i];
+                if (hh > bestH) {
+                    bestH = hh;
+                    cx0 = -TER_HALF + i * cell;
+                    cz0 = -TER_HALF + j * cell;
+                }
+            }
+        float stepH = g.terr > 0.05f ? g.terr
+                                     : SDL_max(0.5f, g.height / 7.0f);
+        std::vector<float> sxs, szs;
+        float ang = 0.0f;
+        const float turn = SDL_max(0.05f, g.spiralTurn);
+        for (float lv = bestH - stepH * 0.5f;
+             lv > seaLevel + stepH * 0.5f && sxs.size() < 20000;
+             lv -= stepH) {
+            int nsteps = SDL_max(8, (int)(96.0f * turn));
+            for (int k = 0; k <= nsteps; k++) {
+                float a = ang + 6.2831853f * turn * k / nsteps;
+                float dx = cosf(a), dz = sinf(a);
+                float found = 0.0f;
+                for (float r = 0.0f; r < TER_HALF * 1.6f; r += cell * 0.6f) {
+                    float x = cx0 + dx * r, z = cz0 + dz * r;
+                    if (fabsf(x) > TER_HALF || fabsf(z) > TER_HALF)
+                        break;
+                    if (height_at(x, z) < lv)
+                        break;          // the lip of this terrace
+                    found = r;
+                }
+                if (found <= 0.0f)
+                    continue;
+                // sit on the tread, back from the drop
+                float rr = SDL_max(0.3f, found - halfW * 1.3f - g.spiralInset);
+                sxs.push_back(SDL_clamp(cx0 + dx * rr, -TER_HALF + cell,
+                                        TER_HALF - cell));
+                szs.push_back(SDL_clamp(cz0 + dz * rr, -TER_HALF + cell,
+                                        TER_HALF - cell));
+            }
+            ang += 6.2831853f * turn;
+        }
+        carve_route(sxs, szs);
+        // and a way down to the water from where the road runs out
+        if (g.shorePath && !sxs.empty()) {
+            std::vector<float> bx2, bz2;
+            if (gen_route(sxs.back(), szs.back(), 0.0f, 0.0f, seaLevel,
+                          bx2, bz2, true))
+                carve_route(bx2, bz2);
+        }
+    } else {
+        for (size_t n = 0; n + 1 < nodes.size(); n++) {
+            float ax = nodes[n].x, az = nodes[n].z;
+            float bx = nodes[n + 1].x, bz = nodes[n + 1].z;
+            float dx = bx - ax, dz = bz - az;
+            if (sqrtf(dx * dx + dz * dz) < cell * 2.0f)
+                continue;
+            // route it across the terrain; a straight line is only the
+            // fallback for when no walkable way exists at all
+            std::vector<float> rx, rz;
+            if (!gen_route(ax, az, bx, bz, seaLevel, rx, rz)) {
+                rx = { ax, bx };
+                rz = { az, bz };
+            }
+            carve_route(rx, rz);
         }
     }
     gHeightsDirty = gMaskDirty = gMask2Dirty = gKillDirty = true;
@@ -2846,7 +2915,8 @@ struct TuneBlob {
     int   autoGrow = 1;
     int   trimSkirt = 0;
     int   genFlats = 3, genPaths = 1, genPathPaint = 1, genShorePath = 1;
-    int   genSummitPath = 1, genPathLayer = 1;
+    int   genSummitPath = 1, genPathLayer = 1, genSpiral = 1;
+    float genSpiralTurn = 0.45f, genSpiralInset = 0.6f;
     float genFlatSize = 0.20f, genFlatFlat = 0.9f;
     float genPathWidth = 2.2f, genPathWander = 0.5f, genPathCut = 0.85f;
     float genPathGrade = 0.30f, genPathBank = 0.9f, genPathCling = 1.0f;
@@ -3820,6 +3890,9 @@ int main(int argc, char** argv)
         gTune.genPathCling = gGen.pathCling;
         gTune.genSummitPath = gGen.summitPath ? 1 : 0;
         gTune.genPathLayer = gGen.pathLayer;
+        gTune.genSpiral = gGen.spiralRoad ? 1 : 0;
+        gTune.genSpiralTurn = gGen.spiralTurn;
+        gTune.genSpiralInset = gGen.spiralInset;
         memset(gTune.propSelId, 0, sizeof gTune.propSelId);
         if (propSel >= 0 && propSel < (int)gPropMeshes.size())
             SDL_strlcpy(gTune.propSelId,
@@ -3897,6 +3970,9 @@ int main(int argc, char** argv)
             gGen.pathCling = gTune.genPathCling;
             gGen.summitPath = gTune.genSummitPath != 0;
             gGen.pathLayer = SDL_clamp(gTune.genPathLayer, 0, 1);
+            gGen.spiralRoad = gTune.genSpiral != 0;
+            gGen.spiralTurn = gTune.genSpiralTurn;
+            gGen.spiralInset = gTune.genSpiralInset;
             if (gTune.propSelId[0]) {
                 for (int mi = 0; mi < (int)gPropMeshes.size(); mi++)
                     if (mesh_id(gPropMeshes[mi]) == gTune.propSelId) {
@@ -4872,6 +4948,23 @@ int main(int argc, char** argv)
                             genDirty |= ImGui::SliderFloat("Trail Cut",
                                                            &gGen.pathCut, 0.0f,
                                                            1.0f, "%.2f");
+                            genDirty |= ImGui::Checkbox("Terrace Road",
+                                                        &gGen.spiralRoad);
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip(
+                                    "One road wrapping the hill: it follows "
+                                    "each terrace for part of a turn, then "
+                                    "steps down onto the next.\nOff: trails "
+                                    "are routed between the clearings "
+                                    "instead, taking the short way.");
+                            if (gGen.spiralRoad) {
+                                genDirty |= ImGui::SliderFloat(
+                                    "Turn per Terrace", &gGen.spiralTurn,
+                                    0.1f, 1.5f, "%.2f");
+                                genDirty |= ImGui::SliderFloat(
+                                    "Road Inset", &gGen.spiralInset,
+                                    0.0f, 5.0f, "%.2f");
+                            }
                             genDirty |= ImGui::SliderFloat("Cling to Terrain",
                                                            &gGen.pathCling,
                                                            0.0f, 1.0f, "%.2f");
