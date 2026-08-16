@@ -3838,6 +3838,18 @@ int main(int argc, char** argv)
                         if (dest.empty()) {
                             SDL_Log("install: could not find zelda.exe");
                         } else {
+                            // Export the island itself alongside the chart
+                            // and point the selected quadrant at it, so the
+                            // game derives its shoreline, foam and collision
+                            // from exactly what is on screen here -- the
+                            // current waterline, skirt and sculpt.
+                            syncSettingsOut();
+                            char isle[700];
+                            SDL_snprintf(isle, sizeof isle,
+                                         "%s/island_%c%d.wmap", dest.c_str(),
+                                         'A' + gWorldSel[0], gWorldSel[1] + 1);
+                            save_map(isle);
+                            gWorldCells[gWorldSel[1]][gWorldSel[0]] = isle;
                             // one chart only, or the client picks whichever
                             // it happens to see first
                             for (const auto& e :
