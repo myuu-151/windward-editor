@@ -6415,6 +6415,14 @@ int main(int argc, char** argv)
                             slot.clear();
                         }
                         new_map();
+                        // Sink the ground rather than flatten it. A zeroed
+                        // heightmap is still a floor: it saves into the
+                        // map, the client loads it, and you stand on an
+                        // invisible plane over open water with your shadow
+                        // on it. Down here nothing draws and nothing
+                        // carries you, in either program, and the map
+                        // format needs no say in it.
+                        std::fill(gHeights.begin(), gHeights.end(), -100.0f);
                         gShowGround = false;   // nothing at all, not a floor
                         gGen.on = false;
                         gGenBase.clear();
@@ -6431,6 +6439,66 @@ int main(int argc, char** argv)
                         SDL_Log("cleared %c%d", 'A' + gWorldSel[0],
                                 gWorldSel[1] + 1);
                     }
+                    ImGui::SameLine();
+                    if (ImGui::Button(gShowGround ? "Hide Plane"
+                                                  : "Add Plane")) {
+                        gShowGround = !gShowGround;
+                        if (gShowGround) {
+                            for (float& h : gHeights)
+                                if (h < -50.0f)
+                                    h = 0.0f;
+                            gShoreBase.clear();
+                            mark_all_dirty();
+                        }
+                    }
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("A quadrant built out of props "
+                                          "wants no ground under it.\nPut a "
+                                          "plane back when you want to "
+                                          "sculpt again.");
+                    if (ImGui::Button("Reset Editor")) {
+                        // Everything the editor remembers between runs:
+                        // the chart, every island slot it owns, and the
+                        // working map. Without this a deleted quadrant
+                        // keeps coming back, because the chart is reloaded
+                        // at startup and still points at what it knew.
+                        std::error_code ec3;
+                        for (int y = 0; y < WORLD_MAX; y++)
+                            for (int x = 0; x < WORLD_MAX; x++) {
+                                if (!gWorldCells[y][x].empty())
+                                    std::filesystem::remove(gWorldCells[y][x],
+                                                            ec3);
+                                gWorldCells[y][x].clear();
+                            }
+                        std::filesystem::remove_all(
+                            std::string(SDL_GetBasePath()) + "islands", ec3);
+                        std::filesystem::remove(editor_chart_path(), ec3);
+                        std::filesystem::remove(
+                            std::string(SDL_GetBasePath()) + "../map.bin", ec3);
+                        gWorldSel[0] = gWorldSel[1] = 0;
+                        gSpawnCell[0] = gSpawnCell[1] = -1;
+                        new_map();
+                        std::fill(gHeights.begin(), gHeights.end(), -100.0f);
+                        gShowGround = false;
+                        gGen.on = false;
+                        gGenBase.clear();
+                        gGenMask.clear(); gGenMask2.clear(); gGenKill.clear();
+                        gGenProps.clear();
+                        rebuild_terrain_mesh();
+                        rebuild_grass_instances();
+                        glBindBuffer(GL_ARRAY_BUFFER, instVbo);
+                        glBufferData(GL_ARRAY_BUFFER,
+                                     inst.size() * sizeof(float),
+                                     inst.data(), GL_STATIC_DRAW);
+                        glBindBuffer(GL_ARRAY_BUFFER, 0);
+                        SDL_Log("editor reset: chart, slots and map.bin gone");
+                    }
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Forgets everything between runs: "
+                                          "the chart, every island slot and "
+                                          "the working map.\nDeletes those "
+                                          "files. Islands saved elsewhere "
+                                          "are left alone.");
                     if (ImGui::IsItemHovered())
                         ImGui::SetTooltip("Empties the quadrant: the island, "
                                           "its file and its place on the "
