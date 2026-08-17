@@ -5086,29 +5086,38 @@ int main(int argc, char** argv)
             // still there, sunk far below the sea, and the ray happily
             // hits it -- which put props a hundred units under the water
             // instead of on the waterline.
-            hasHit = gShowGround ? ray_terrain(camPos, rd, hit) : false;
-            // Anything the ray finds below the sea is not somewhere you
-            // meant to click -- a sunk heightmap, a cleared quadrant, the
-            // sea floor. Fall through to the waterline in every one of
-            // those cases rather than only when the ground is hidden.
-            if ((!hasHit || hit[1] < gWaterline - 0.25f) && rd[1] < -0.0001f) {
-                // With the ground gone there is nothing to raycast, so the
-                // brush would have nowhere to land and props could not be
-                // placed at all. Fall back to the waterline: it is the one
-                // reference a quadrant always has, and it is where a
-                // prop-built level sits anyway.
+            // The waterline is a real surface to work on, not a
+            // fallback. A quadrant built out of props has no terrain at
+            // all, so the cursor has to land somewhere regardless: the sea
+            // plane is the one thing every quadrant has, and it is where a
+            // prop-built level sits. Ground, when there is any, simply
+            // wins wherever it stands above the water.
+            hasHit = false;
+            if (rd[1] < -0.0001f) {
                 const float t = (gWaterline - camPos[1]) / rd[1];
                 if (t > 0.0f) {
                     hit[0] = camPos[0] + rd[0] * t;
                     hit[1] = gWaterline;
                     hit[2] = camPos[2] + rd[2] * t;
-                    hasHit = fabsf(hit[0]) <= TER_HALF &&
-                             fabsf(hit[2]) <= TER_HALF;
+                    hasHit = true;
+                }
+            }
+            if (gShowGround) {
+                float gh[3] = { 0, 0, 0 };
+                if (ray_terrain(camPos, rd, gh) && gh[1] > gWaterline) {
+                    hit[0] = gh[0]; hit[1] = gh[1]; hit[2] = gh[2];
+                    hasHit = true;
                 }
             }
             if (ImGui::GetIO().WantCaptureMouse)
                 hasHit = false;   // cursor over the panel: never paint through
             bool painting = hasHit && (mb & SDL_BUTTON_LMASK) && !shotPath;
+            static bool wasDown = false;
+            const bool isDown = (mb & SDL_BUTTON_LMASK) != 0;
+            if (isDown && !wasDown && activeTab == 3 && !hasHit)
+                SDL_Log("place: no hit (ray missed; ground %d, looking %s)",
+                        gShowGround ? 1 : 0, rd[1] < 0.0f ? "down" : "up");
+            wasDown = isDown;
             bool clickEdge = painting && !wasPainting;
             if (painting && activeTab != 3 && mode == BRUSH_ROAD) {
                 if (!wasPainting) {
@@ -5155,6 +5164,10 @@ int main(int argc, char** argv)
                             keys[SDL_SCANCODE_LSHIFT] != 0, brushStrength,
                             paintTarget);
             } else if (activeTab == 3 && hasHit) {
+                if (clickEdge)
+                    SDL_Log("place: tool %d sel %d hit %.1f %.1f %.1f ground %d",
+                            propTool, propSel, hit[0], hit[1], hit[2],
+                            gShowGround ? 1 : 0);
                 // ---- prop tools
                 if (propTool == 0 && clickEdge && propSel >= 0 &&
                     load_prop(propSel)) {
