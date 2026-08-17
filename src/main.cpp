@@ -5048,7 +5048,11 @@ int main(int argc, char** argv)
             // hits it -- which put props a hundred units under the water
             // instead of on the waterline.
             hasHit = gShowGround ? ray_terrain(camPos, rd, hit) : false;
-            if (!hasHit && !gShowGround && rd[1] < -0.0001f) {
+            // Anything the ray finds below the sea is not somewhere you
+            // meant to click -- a sunk heightmap, a cleared quadrant, the
+            // sea floor. Fall through to the waterline in every one of
+            // those cases rather than only when the ground is hidden.
+            if ((!hasHit || hit[1] < gWaterline - 0.25f) && rd[1] < -0.0001f) {
                 // With the ground gone there is nothing to raycast, so the
                 // brush would have nowhere to land and props could not be
                 // placed at all. Fall back to the waterline: it is the one
