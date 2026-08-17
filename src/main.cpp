@@ -3779,7 +3779,11 @@ static void save_map(const char* path)
         SDL_Log("save failed: %s", path);
         return;
     }
-    const char magic[8] = { 'T','E','R','M','A','P','0','8' };
+    // '9' marks a quadrant built from props: same layout as '8', but its
+    // heightmap is a footprint stamped under the props for the sea and
+    // collision to read, not ground meant to be drawn.
+    const char magic[8] = { 'T','E','R','M','A','P','0',
+                            gShowGround ? '8' : '9' };
     fwrite(magic, 1, 8, f);
     // world size and the resolutions that scale with it, so a map opens
     // at the size it was authored
