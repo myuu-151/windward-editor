@@ -4247,6 +4247,11 @@ static std::string gWorldCells[WORLD_MAX][WORLD_MAX];
 static int gWorldSel[2] = { 0, 0 };
 static int gTestCell[2] = { 1, 0 };   // built-in test island quadrant
 static int gSpawnCell[2] = { -1, -1 };  // where the game starts you; -1 = unset
+// How high the wind ribbons drift in each quadrant. They are fixed in world
+// space, so an island sunk into the water leaves them far overhead and a
+// tall one has them cutting through it -- this lets a quadrant say where
+// its own sky is. 0 means "as the game has it".
+static float gWorldWind[WORLD_MAX][WORLD_MAX] = {};
 static bool gShowWater = true;
 
 // Every quadrant is a slot on disk under the editor, so islands persist
@@ -4324,6 +4329,10 @@ static bool load_world(const char* path)
             gWorldSize = SDL_clamp(n, 2, WORLD_MAX);
         else if (sscanf(line, "waterline %f", &wl) == 1)
             gWaterline = wl;
+        else if (sscanf(line, "wind %d %d %f", &x, &y, &wl) == 3) {
+            if (x >= 0 && y >= 0 && x < WORLD_MAX && y < WORLD_MAX)
+                gWorldWind[y][x] = wl;
+        }
         else if (sscanf(line, "spawn %d %d", &x, &y) == 2) {
             gSpawnCell[0] = SDL_clamp(x, 0, WORLD_MAX - 1);
             gSpawnCell[1] = SDL_clamp(y, 0, WORLD_MAX - 1);
@@ -6952,6 +6961,23 @@ int main(int argc, char** argv)
                                           "its file and its place on the "
                                           "chart.\nThis deletes the .wmap on "
                                           "disk.");
+                    {
+                        float& wh = gWorldWind[gWorldSel[1]][gWorldSel[0]];
+                        float v = wh > 0.01f ? wh : 7.0f;
+                        if (ImGui::SliderFloat("Wind Ribbon Height", &v,
+                                               0.0f, 60.0f, "%.0f"))
+                            wh = v;
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip(
+                                "How high the wind ribbons drift in this "
+                                "quadrant. They sit in world space, so an "
+                                "island sunk into the water leaves them far "
+                                "overhead and a tall one has them cutting "
+                                "through it.");
+                        ImGui::SameLine();
+                        if (ImGui::Button("Default##wind"))
+                            wh = 0.0f;
+                    }
                     ImGui::SeparatorText("Send to Game");
                     if (ImGui::Button("Install Chart to Game")) {
                         namespace fs = std::filesystem;
