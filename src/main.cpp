@@ -3941,25 +3941,14 @@ static void save_map(const char* path)
             if (!grew)
                 break;
         }
-        // and take the stamp noise out of the surface
-        for (int pass = 0; pass < 2; pass++) {
-            std::vector<float> prev = foot;
-            for (int j = 1; j < HN - 1; j++)
-                for (int i = 1; i < HN - 1; i++) {
-                    const size_t k = (size_t)j * HN + i;
-                    if (prev[k] < -50.0f)
-                        continue;
-                    float sum = 0.0f;
-                    int n = 0;
-                    for (int dj = -1; dj <= 1; dj++)
-                        for (int di = -1; di <= 1; di++) {
-                            const float v = prev[(size_t)(j + dj) * HN + i + di];
-                            if (v > -50.0f) { sum += v; n++; }
-                        }
-                    if (n > 0)
-                        foot[k] = sum / n;
-                }
-        }
+        // No averaging here. Smoothing a stamped surface pulls it down
+        // toward its neighbours, and a collision surface that sits a
+        // little under the model is one you sink into. A small lift
+        // instead, so a vertex stamp lands on the visible face rather
+        // than just below it.
+        for (float& v : foot)
+            if (v > -50.0f)
+                v += 0.06f;
         int landCells = 0;
         for (float v : foot)
             if (v > -50.0f)
