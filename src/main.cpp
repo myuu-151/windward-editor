@@ -4073,30 +4073,12 @@ static void save_map(const char* path)
             if (!fixed)
                 break;
         }
-        // Grow the surface a little past the model's rim. A cell counts as
-        // surface only when its centre is covered, and the client samples
-        // this field bilinearly -- so ground next to open water reads lower
-        // than it is, and you fall a cell or two before the edge you can
-        // see. Two rings of the nearest height put the drop where the model
-        // actually ends.
-        for (int pass = 0; pass < 2; pass++) {
-            std::vector<float> prev = foot;
-            for (int j = 1; j < HN - 1; j++)
-                for (int i = 1; i < HN - 1; i++) {
-                    const size_t k = (size_t)j * HN + i;
-                    if (prev[k] > -50.0f)
-                        continue;
-                    float best = -100.0f;
-                    for (int dj = -1; dj <= 1; dj++)
-                        for (int di = -1; di <= 1; di++) {
-                            const float v = prev[(size_t)(j + dj) * HN + i + di];
-                            if (v > best)
-                                best = v;
-                        }
-                    if (best > -50.0f)
-                        foot[k] = best;
-                }
-        }
+        // No outward growth. Padding the surface past the rim was there to
+        // stop falling short of the edge, but it means standing on ground
+        // the model does not have -- and a body floating above the surface
+        // throws its shadow to one side, since the sun comes in at about
+        // thirty degrees. The triangle bake covers the model properly now,
+        // so the edge can be the edge.
         // Where the hull crosses the water, cell by cell.
         {
             const float mcell = 2.0f * TER_HALF / MASK_N;
