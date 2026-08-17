@@ -4009,6 +4009,30 @@ static void save_map(const char* path)
             if (!fixed)
                 break;
         }
+        // Grow the surface a little past the model's rim. A cell counts as
+        // surface only when its centre is covered, and the client samples
+        // this field bilinearly -- so ground next to open water reads lower
+        // than it is, and you fall a cell or two before the edge you can
+        // see. Two rings of the nearest height put the drop where the model
+        // actually ends.
+        for (int pass = 0; pass < 2; pass++) {
+            std::vector<float> prev = foot;
+            for (int j = 1; j < HN - 1; j++)
+                for (int i = 1; i < HN - 1; i++) {
+                    const size_t k = (size_t)j * HN + i;
+                    if (prev[k] > -50.0f)
+                        continue;
+                    float best = -100.0f;
+                    for (int dj = -1; dj <= 1; dj++)
+                        for (int di = -1; di <= 1; di++) {
+                            const float v = prev[(size_t)(j + dj) * HN + i + di];
+                            if (v > best)
+                                best = v;
+                        }
+                    if (best > -50.0f)
+                        foot[k] = best;
+                }
+        }
         int landCells = 0;
         for (float v : foot)
             if (v > -50.0f)
