@@ -4171,6 +4171,38 @@ static void save_map(const char* path)
         fwrite(&cn, 4, 1, f);
         fwrite(gCamFoot.data(), sizeof(float), gCamFoot.size(), f);
     }
+    // Which parts of each model are ground, and which stop the camera. The
+    // client collides against the model's own triangles now, so these have
+    // to travel with the map -- baking them into a footprint no longer
+    // tells it anything.
+    {
+        std::vector<int> used;
+        for (const PropInst& pi : gProps)
+            if (std::find(used.begin(), used.end(), pi.mesh) == used.end())
+                used.push_back(pi.mesh);
+        if (!used.empty()) {
+            fwrite("PARTFLG1", 1, 8, f);
+            Uint32 mc = (Uint32)used.size();
+            fwrite(&mc, 4, 1, f);
+            for (int mi : used) {
+                const PropMesh& pm = gPropMeshes[mi];
+                std::string id = pm.category + "/" + pm.label;
+                Uint16 il = (Uint16)id.size();
+                fwrite(&il, 2, 1, f);
+                fwrite(id.data(), 1, il, f);
+                Uint16 nm = (Uint16)pm.mats.size();
+                fwrite(&nm, 2, 1, f);
+                for (const PropMaterial& mm : pm.mats) {
+                    Uint16 nl = (Uint16)mm.name.size();
+                    fwrite(&nl, 2, 1, f);
+                    fwrite(mm.name.data(), 1, nl, f);
+                    Uint8 fl = (Uint8)((mm.collide ? 1 : 0) |
+                                       (mm.camBlock ? 2 : 0));
+                    fwrite(&fl, 1, 1, f);
+                }
+            }
+        }
+    }
     fclose(f);
     SDL_Log("saved %s", path);
 }
