@@ -3853,7 +3853,10 @@ static void save_map(const char* path)
     // what was placed, open water everywhere else. Nothing downstream has
     // to change, because it is the same data the client always consumed.
     if (!gShowGround && !gProps.empty()) {
-        std::vector<float> foot(gHeights.size(), gWaterline - 6.0f);
+        // Deep enough to read as absent, not merely underwater: the
+        // client treats ground above -50 as solid, so a footprint whose
+        // sea was only a few units down made the whole quadrant walkable.
+        std::vector<float> foot(gHeights.size(), -100.0f);
         const float cell = 2.0f * TER_HALF / (HN - 1);
         for (const PropInst& pi : gProps) {
             const PropMesh& pm = gPropMeshes[pi.mesh];
