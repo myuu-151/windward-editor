@@ -5149,8 +5149,10 @@ int main(int argc, char** argv)
                     hit[1] = gWaterline;
                     hit[2] = SDL_clamp(camPos[2] + rd[2] * t,
                                        -TER_HALF, TER_HALF);
-                    hasHit = fabsf(camPos[0] + rd[0] * t) <= TER_HALF * 1.5f &&
-                             fabsf(camPos[2] + rd[2] * t) <= TER_HALF * 1.5f;
+                    // clamped, never refused: rejecting a click that met
+                    // the sea beyond the quadrant meant most of the screen
+                    // did nothing, since the camera sits well back
+                    hasHit = true;
                 }
             }
             if (gShowGround) {
