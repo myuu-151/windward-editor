@@ -959,6 +959,9 @@ static float gWaterline = -3.0f;   // sea level, world units
 // imported geometry wants no ground plane under it at all, and a flat
 // plane at sea level is not "nothing", it is a floor in the way.
 static bool gShowGround = false;
+// the waterline outline a props-only bake produces, written in place of
+// the soft-dirt layer those maps never draw
+static std::vector<Uint8> gShoreMask;
 // How far the baked collision surface sits above the stamped vertices. A
 // cell takes the highest vertex in it, which on a coarse face is below the
 // surface between those vertices -- so without a lift you sink into the
@@ -3906,6 +3909,14 @@ static void save_map(const char* path)
         // client treats ground above -50 as solid, so a footprint whose
         // sea was only a few units down made the whole quadrant walkable.
         std::vector<float> foot(gHeights.size(), -100.0f);
+        // Where the model actually meets the sea. The heightfield can only
+        // hold one height per cell and collision needs the top surface, so
+        // an overhanging island's deck outline is not its waterline -- and
+        // the sea drew its foam around the deck, out in open water. A
+        // props-only quadrant does not draw its paint layers, so the soft
+        // dirt mask is free to carry the waterline cross-section instead.
+        std::vector<Uint8> shore(gMask2.size(), 0);
+        const float seaY = gWaterline;
         const float cell = 2.0f * TER_HALF / (HN - 1);
         for (const PropInst& pi : gProps) {
             const PropMesh& pm = gPropMeshes[pi.mesh];
@@ -3965,6 +3976,26 @@ static void save_map(const char* path)
                                     (c[0] - b[0]) * (a[2] - c[2]);
                     if (fabsf(d) < 1e-9f)
                         continue;      // edge-on, contributes no surface
+                    // any triangle spanning sea level marks the cells it
+                    // crosses: that is the island's outline at the water
+                    if ((a[1] - seaY) * (b[1] - seaY) <= 0.0f ||
+                        (b[1] - seaY) * (c[1] - seaY) <= 0.0f ||
+                        (a[1] - seaY) * (c[1] - seaY) <= 0.0f) {
+                        const float mcell2 = 2.0f * TER_HALF / MASK_N;
+                        const float* vv[3] = { a, b, c };
+                        for (const float* v : vv) {
+                            const int mi2 = (int)((v[0] + TER_HALF) / mcell2);
+                            const int mj2 = (int)((v[2] + TER_HALF) / mcell2);
+                            for (int dj = -1; dj <= 1; dj++)
+                                for (int di = -1; di <= 1; di++) {
+                                    const int xi = mi2 + di, xj = mj2 + dj;
+                                    if (xi < 0 || xj < 0 || xi >= MASK_N ||
+                                        xj >= MASK_N)
+                                        continue;
+                                    shore[(size_t)xj * MASK_N + xi] = 255;
+                                }
+                        }
+                    }
                     bool covered = false;
                     for (int j = j0; j <= j1; j++)
                         for (int i = i0; i <= i1; i++) {
@@ -4071,6 +4102,40 @@ static void save_map(const char* path)
                         foot[k] = best;
                 }
         }
+        // Flood the outside, so everything the outline encloses counts as
+        // land: a ring alone tells the sea nothing about which side is wet.
+        {
+            std::vector<Uint8> outside(shore.size(), 0);
+            std::vector<int> stack;
+            auto push = [&](int i, int j) {
+                if (i < 0 || j < 0 || i >= MASK_N || j >= MASK_N)
+                    return;
+                const size_t k = (size_t)j * MASK_N + i;
+                if (outside[k] || shore[k])
+                    return;
+                outside[k] = 1;
+                stack.push_back((int)k);
+            };
+            for (int i = 0; i < MASK_N; i++) {
+                push(i, 0);
+                push(i, MASK_N - 1);
+            }
+            for (int j = 0; j < MASK_N; j++) {
+                push(0, j);
+                push(MASK_N - 1, j);
+            }
+            while (!stack.empty()) {
+                const int k = stack.back();
+                stack.pop_back();
+                const int i = k % MASK_N, j = k / MASK_N;
+                push(i - 1, j); push(i + 1, j);
+                push(i, j - 1); push(i, j + 1);
+            }
+            for (size_t k = 0; k < shore.size(); k++)
+                if (!outside[k])
+                    shore[k] = 255;
+        }
+        gShoreMask = shore;
         int landCells = 0;
         for (float v : foot)
             if (v > -50.0f)
@@ -4083,7 +4148,11 @@ static void save_map(const char* path)
     }
     fwrite(gMask.data(), 1, gMask.size(), f);
     fwrite(gKill.data(), 1, gKill.size(), f);
-    fwrite(gMask2.data(), 1, gMask2.size(), f);
+    if (!gShowGround && !gShoreMask.empty() &&
+        gShoreMask.size() == gMask2.size())
+        fwrite(gShoreMask.data(), 1, gShoreMask.size(), f);
+    else
+        fwrite(gMask2.data(), 1, gMask2.size(), f);
     // props: identified by "category/label" so mesh order can change
     Uint32 n = (Uint32)gProps.size();
     fwrite(&n, 4, 1, f);
