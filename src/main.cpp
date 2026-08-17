@@ -3358,10 +3358,14 @@ static bool import_glb_into(PropMesh& m, const std::string& path)
                         texCache[im] = t;
                         grayCache[im] = gray;
                         mat.tex = t;
-                        mat.grayMask = gray;
+                        // a mask only if a Color Ramp tints it: grey rock is
+                        // a picture, not a mask, and drawing it as one makes
+                        // it read far darker than it should
+                        mat.grayMask = gray && grads.find(mat.name) != grads.end();
                     } else {
                         mat.tex = it->second;
-                        mat.grayMask = grayCache[im];
+                        mat.grayMask = grayCache[im] &&
+                                       grads.find(mat.name) != grads.end();
                     }
                     if (mat.tex) {
                         // the texture carries the colour; the factor is a
