@@ -3978,9 +3978,18 @@ static void save_map(const char* path)
                         continue;      // edge-on, contributes no surface
                     // any triangle spanning sea level marks the cells it
                     // crosses: that is the island's outline at the water
-                    if ((a[1] - seaY) * (b[1] - seaY) <= 0.0f ||
-                        (b[1] - seaY) * (c[1] - seaY) <= 0.0f ||
-                        (a[1] - seaY) * (c[1] - seaY) <= 0.0f) {
+                    // Several heights around sea level, as the reference
+                    // bake does: a single slice misses geometry that runs
+                    // nearly parallel to the water and leaves gaps in the
+                    // outline where the hull is shallowest.
+                    bool spans = false;
+                    for (int sl = -1; sl <= 1 && !spans; sl++) {
+                        const float zw = seaY + sl * 0.6f;
+                        spans = (a[1] - zw) * (b[1] - zw) <= 0.0f ||
+                                (b[1] - zw) * (c[1] - zw) <= 0.0f ||
+                                (a[1] - zw) * (c[1] - zw) <= 0.0f;
+                    }
+                    if (spans) {
                         const float mcell2 = 2.0f * TER_HALF / MASK_N;
                         const float* vv[3] = { a, b, c };
                         for (const float* v : vv) {
