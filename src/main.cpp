@@ -959,6 +959,11 @@ static float gWaterline = -3.0f;   // sea level, world units
 // imported geometry wants no ground plane under it at all, and a flat
 // plane at sea level is not "nothing", it is a floor in the way.
 static bool gShowGround = false;
+// How far the baked collision surface sits above the stamped vertices. A
+// cell takes the highest vertex in it, which on a coarse face is below the
+// surface between those vertices -- so without a lift you sink into the
+// model you can see.
+static float gFootLift = 0.15f;
 
 // Where a prop sits at a spot. With no terrain this is the sea, not the
 // bottom of a heightmap that was sunk out of the way -- placing read the
@@ -3800,6 +3805,7 @@ struct TuneBlob {
     int   autoGrow = 1;
     int   trimSkirt = 0;
     float detailMult = 1.0f;
+    float footLift = 0.15f;
     int   propsOnly = 0;   // quadrant built from props, no ground
     int   genFlats = GenParams().flats;
     int   genPaths = GenParams().paths ? 1 : 0;
@@ -3872,28 +3878,60 @@ static void save_map(const char* path)
             // cell at its own height; the mesh is dense enough that the
             // outline comes out as the model's own.
             if (!pm.pts.empty()) {
+                // Rasterise the model's TRIANGLES, the way the built-in
+                // test island's heightfield was baked. Stamping vertices
+                // only samples the corners: a cell between them keeps
+                // whatever the neighbours had, which reads as sinking into
+                // a face you can see, and no amount of lifting the result
+                // fixes a surface that was never measured. Interpolating
+                // across each triangle gives the real height at each cell.
                 const float cs = cosf(pi.yaw), sn = sinf(pi.yaw);
-                for (size_t v = 0; v + 2 < pm.pts.size(); v += 3) {
-                    const size_t vi = v / 3;
+                auto place = [&](size_t v, float* o) {
+                    const float lx = pm.pts[v] * pi.scale;
+                    const float ly = pm.pts[v + 1] * pi.scale;
+                    const float lz = pm.pts[v + 2] * pi.scale;
+                    o[0] = pi.x + lx * cs - lz * sn;
+                    o[1] = pi.y + ly;
+                    o[2] = pi.z + lx * sn + lz * cs;
+                };
+                for (size_t t = 0; t + 8 < pm.pts.size(); t += 9) {
+                    const size_t vi = t / 3;
                     if (vi < pm.ptMat.size()) {
                         const int mi = pm.ptMat[vi];
                         if (mi >= 0 && mi < (int)pm.mats.size() &&
                             !pm.mats[mi].collide)
                             continue;   // scenery, not ground
                     }
-                    const float lx = pm.pts[v] * pi.scale;
-                    const float ly = pm.pts[v + 1] * pi.scale;
-                    const float lz = pm.pts[v + 2] * pi.scale;
-                    const float wx = pi.x + lx * cs - lz * sn;
-                    const float wz = pi.z + lx * sn + lz * cs;
-                    const float wy = pi.y + ly;
-                    const int i = (int)((wx + TER_HALF) / cell + 0.5f);
-                    const int j = (int)((wz + TER_HALF) / cell + 0.5f);
-                    if (i < 0 || j < 0 || i >= HN || j >= HN)
-                        continue;
-                    float& h = foot[(size_t)j * HN + i];
-                    if (wy > h)
-                        h = wy;
+                    float a[3], b[3], c[3];
+                    place(t, a); place(t + 3, b); place(t + 6, c);
+                    const float minx = SDL_min(a[0], SDL_min(b[0], c[0]));
+                    const float maxx = SDL_max(a[0], SDL_max(b[0], c[0]));
+                    const float minz = SDL_min(a[2], SDL_min(b[2], c[2]));
+                    const float maxz = SDL_max(a[2], SDL_max(b[2], c[2]));
+                    const int i0 = SDL_clamp((int)((minx + TER_HALF) / cell), 0, HN - 1);
+                    const int i1 = SDL_clamp((int)((maxx + TER_HALF) / cell) + 1, 0, HN - 1);
+                    const int j0 = SDL_clamp((int)((minz + TER_HALF) / cell), 0, HN - 1);
+                    const int j1 = SDL_clamp((int)((maxz + TER_HALF) / cell) + 1, 0, HN - 1);
+                    const float d = (b[2] - c[2]) * (a[0] - c[0]) +
+                                    (c[0] - b[0]) * (a[2] - c[2]);
+                    if (fabsf(d) < 1e-9f)
+                        continue;      // edge-on, contributes no surface
+                    for (int j = j0; j <= j1; j++)
+                        for (int i = i0; i <= i1; i++) {
+                            const float x = -TER_HALF + i * cell;
+                            const float z = -TER_HALF + j * cell;
+                            const float w0 = ((b[2] - c[2]) * (x - c[0]) +
+                                              (c[0] - b[0]) * (z - c[2])) / d;
+                            const float w1 = ((c[2] - a[2]) * (x - c[0]) +
+                                              (a[0] - c[0]) * (z - c[2])) / d;
+                            const float w2 = 1.0f - w0 - w1;
+                            if (w0 < -0.001f || w1 < -0.001f || w2 < -0.001f)
+                                continue;
+                            const float y = a[1] * w0 + b[1] * w1 + c[1] * w2;
+                            float& hh = foot[(size_t)j * HN + i];
+                            if (y > hh)
+                                hh = y;
+                        }
                 }
                 continue;
             }
@@ -3914,41 +3952,6 @@ static void save_map(const char* path)
                         h = top;
                 }
         }
-        // Close it into a surface. Stamping vertices leaves single cells
-        // of deck standing in deep water, and anything sampling this
-        // bilinearly -- the client's collision, the shore field -- reads
-        // the average of a deck cell and its -100 neighbour as far below
-        // the sea. So there is no ground anywhere until the gaps between
-        // the stamps are filled in.
-        for (int pass = 0; pass < 12; pass++) {
-            std::vector<float> prev = foot;
-            bool grew = false;
-            for (int j = 1; j < HN - 1; j++)
-                for (int i = 1; i < HN - 1; i++) {
-                    const size_t k = (size_t)j * HN + i;
-                    if (prev[k] > -50.0f)
-                        continue;
-                    float best = -100.0f;
-                    int n = 0;
-                    for (int dj = -1; dj <= 1; dj++)
-                        for (int di = -1; di <= 1; di++) {
-                            const float v = prev[(size_t)(j + dj) * HN + i + di];
-                            if (v > -50.0f) { n++; best = SDL_max(best, v); }
-                        }
-                    // three neighbours means an interior gap, not the edge
-                    if (n >= 3) { foot[k] = best; grew = true; }
-                }
-            if (!grew)
-                break;
-        }
-        // No averaging here. Smoothing a stamped surface pulls it down
-        // toward its neighbours, and a collision surface that sits a
-        // little under the model is one you sink into. A small lift
-        // instead, so a vertex stamp lands on the visible face rather
-        // than just below it.
-        for (float& v : foot)
-            if (v > -50.0f)
-                v += 0.06f;
         int landCells = 0;
         for (float v : foot)
             if (v > -50.0f)
@@ -4920,6 +4923,7 @@ int main(int argc, char** argv)
         gTune.autoGrow = autoGrow ? 1 : 0;
         gTune.trimSkirt = trimSkirt ? 1 : 0;
         gTune.detailMult = gDetailMult;
+        gTune.footLift = gFootLift;
         gTune.propsOnly = gShowGround ? 0 : 1;
         gTune.genFlats = gGen.flats;
         gTune.genPaths = gGen.paths ? 1 : 0;
@@ -4999,6 +5003,7 @@ int main(int argc, char** argv)
             autoGrow = gTune.autoGrow != 0;
             trimSkirt = gTune.trimSkirt != 0;
             gDetailMult = SDL_clamp(gTune.detailMult, 0.5f, 4.0f);
+            gFootLift = SDL_clamp(gTune.footLift, 0.0f, 1.0f);
             gShowGround = gTune.propsOnly == 0;
             if (gTune.propSelId[0]) {
                 for (int mi = 0; mi < (int)gPropMeshes.size(); mi++)
