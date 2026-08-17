@@ -2861,6 +2861,9 @@ static void apply_part_flags(PropMesh& pm)
 }
 
 static void apply_part_flags(PropMesh& pm);
+static std::string autosave_project_path();
+static bool save_project(const std::string& path);
+static bool load_project(const std::string& path);
 
 static void save_styles()
 {
@@ -3644,6 +3647,9 @@ static void scan_props(const std::string& dir)
     std::sort(gPropTexFiles.begin(), gPropTexFiles.end());
     load_styles();
     load_parts();
+    // pick up where the last session left off
+    if (std::filesystem::exists(autosave_project_path()))
+        load_project(autosave_project_path());
     SDL_Log("props: %d meshes in %d categories",
             (int)gPropMeshes.size(), (int)gPropCats.size());
 }
@@ -4515,6 +4521,9 @@ static const SDL_DialogFileFilter kBlendFilters[] = {
 static const SDL_DialogFileFilter kWorldFilters[] = {
     { "Windward world", "wworld" },
 };
+static const SDL_DialogFileFilter kProjFilters[] = {
+    { "Windward project", "wproject" },
+};
 
 static void SDLCALL map_dialog_cb(void* userdata,
                                   const char* const* filelist, int)
@@ -4523,6 +4532,133 @@ static void SDLCALL map_dialog_cb(void* userdata,
         SDL_strlcpy(gDialogFile, filelist[0], sizeof gDialogFile);
         gDialogAction = (int)(intptr_t)userdata;
     }
+}
+
+// A whole world in one file: the chart's settings and every cell's map,
+// so a session can be put down and picked up again. Exporting a single
+// .wmap only ever carried the cell you had open, which meant the rest of
+// the chart lived on as loose files you had to keep track of yourself.
+// beside the editor itself, so it follows the build rather than the cwd
+static std::string autosave_project_path()
+{
+    const char* base = SDL_GetBasePath();
+    return std::string(base ? base : "") + "autosave.wproject";
+}
+
+static bool save_project(const std::string& path)
+{
+    // the cell on screen may be ahead of the file it came from
+    if (!gWorldCells[gWorldSel[1]][gWorldSel[0]].empty()) {
+        save_parts();
+        save_map(gWorldCells[gWorldSel[1]][gWorldSel[0]].c_str());
+    }
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f)
+        return false;
+    fwrite("WPROJ001", 1, 8, f);
+    Uint32 sz = (Uint32)gWorldSize;
+    fwrite(&sz, 4, 1, f);
+    fwrite(gTestCell, sizeof(int), 2, f);
+    fwrite(gSpawnCell, sizeof(int), 2, f);
+    fwrite(&gWaterline, sizeof(float), 1, f);
+    fwrite(gWorldWind, sizeof(float), WORLD_MAX * WORLD_MAX, f);
+    fwrite(gWorldSel, sizeof(int), 2, f);
+    std::vector<std::pair<int, int>> cells;
+    for (int y = 0; y < WORLD_MAX; y++)
+        for (int x = 0; x < WORLD_MAX; x++)
+            if (!gWorldCells[y][x].empty())
+                cells.push_back({ x, y });
+    Uint32 nc = (Uint32)cells.size();
+    fwrite(&nc, 4, 1, f);
+    for (const auto& c : cells) {
+        const std::string& p = gWorldCells[c.second][c.first];
+        Uint32 cx = (Uint32)c.first, cy = (Uint32)c.second;
+        fwrite(&cx, 4, 1, f);
+        fwrite(&cy, 4, 1, f);
+        Uint32 pl = (Uint32)p.size();
+        fwrite(&pl, 4, 1, f);
+        fwrite(p.data(), 1, pl, f);
+        std::vector<Uint8> blob;
+        if (FILE* g = fopen(p.c_str(), "rb")) {
+            fseek(g, 0, SEEK_END);
+            long n = ftell(g);
+            fseek(g, 0, SEEK_SET);
+            if (n > 0) {
+                blob.resize((size_t)n);
+                if (fread(blob.data(), 1, blob.size(), g) != blob.size())
+                    blob.clear();
+            }
+            fclose(g);
+        }
+        Uint32 bl = (Uint32)blob.size();
+        fwrite(&bl, 4, 1, f);
+        if (bl)
+            fwrite(blob.data(), 1, bl, f);
+    }
+    fclose(f);
+    SDL_Log("saved project %s -- %d cells", path.c_str(), (int)cells.size());
+    return true;
+}
+
+static bool load_project(const std::string& path)
+{
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f)
+        return false;
+    char magic[8];
+    if (fread(magic, 1, 8, f) != 8 || memcmp(magic, "WPROJ001", 8) != 0) {
+        fclose(f);
+        SDL_Log("not a windward project: %s", path.c_str());
+        return false;
+    }
+    Uint32 sz = 7;
+    fread(&sz, 4, 1, f);
+    gWorldSize = SDL_clamp((int)sz, 2, WORLD_MAX);
+    fread(gTestCell, sizeof(int), 2, f);
+    fread(gSpawnCell, sizeof(int), 2, f);
+    fread(&gWaterline, sizeof(float), 1, f);
+    fread(gWorldWind, sizeof(float), WORLD_MAX * WORLD_MAX, f);
+    fread(gWorldSel, sizeof(int), 2, f);
+    for (int y = 0; y < WORLD_MAX; y++)
+        for (int x = 0; x < WORLD_MAX; x++)
+            gWorldCells[y][x].clear();
+    Uint32 nc = 0;
+    fread(&nc, 4, 1, f);
+    int restored = 0;
+    for (Uint32 i = 0; i < nc && i < 4096; i++) {
+        Uint32 cx = 0, cy = 0, pl = 0, bl = 0;
+        if (fread(&cx, 4, 1, f) != 1 || fread(&cy, 4, 1, f) != 1 ||
+            fread(&pl, 4, 1, f) != 1 || pl > 4096)
+            break;
+        std::string p(pl, ' ');
+        if (pl && fread(&p[0], 1, pl, f) != pl)
+            break;
+        if (fread(&bl, 4, 1, f) != 1)
+            break;
+        std::vector<Uint8> blob(bl);
+        if (bl && fread(blob.data(), 1, bl, f) != bl)
+            break;
+        if (cx >= WORLD_MAX || cy >= WORLD_MAX)
+            continue;
+        // put the cell back where it came from, so the chart and the game
+        // install keep pointing at real files
+        if (bl) {
+            if (FILE* g = fopen(p.c_str(), "wb")) {
+                fwrite(blob.data(), 1, bl, g);
+                fclose(g);
+            }
+        }
+        gWorldCells[cy][cx] = p;
+        restored++;
+    }
+    fclose(f);
+    gWorldSel[0] = SDL_clamp(gWorldSel[0], 0, gWorldSize - 1);
+    gWorldSel[1] = SDL_clamp(gWorldSel[1], 0, gWorldSize - 1);
+    const std::string& cur = gWorldCells[gWorldSel[1]][gWorldSel[0]];
+    if (!cur.empty())
+        load_map(cur.c_str());
+    SDL_Log("loaded project %s -- %d cells", path.c_str(), restored);
+    return true;
 }
 
 // stamp the demo diorama for --shot: a wobbly two-rut path plus a low hill
@@ -5431,6 +5567,17 @@ int main(int argc, char** argv)
         } else if (gDialogAction == 2) {
             gDialogAction = 0;
             if (load_map(gDialogFile))
+                applySettingsIn();
+        } else if (gDialogAction == 20) {
+            gDialogAction = 0;
+            std::string p = gDialogFile;
+            if (p.size() < 9 || p.substr(p.size() - 9) != ".wproject")
+                p += ".wproject";
+            syncSettingsOut();
+            save_project(p);
+        } else if (gDialogAction == 21) {
+            gDialogAction = 0;
+            if (load_project(gDialogFile))
                 applySettingsIn();
         } else if (gDialogAction == 3) {
             gDialogAction = 0;
@@ -7293,17 +7440,18 @@ int main(int argc, char** argv)
                                             "unit (clears undo)");
                     }
                     ImGui::SeparatorText("File");
-                    if (ImGui::Button("Export Map..."))
-                        SDL_ShowSaveFileDialog(map_dialog_cb, (void*)1, win,
-                                               kMapFilters, 1, nullptr);
+                    if (ImGui::Button("Save Project..."))
+                        SDL_ShowSaveFileDialog(map_dialog_cb, (void*)20, win,
+                                               kProjFilters, 1, nullptr);
                     ImGui::SameLine();
-                    if (ImGui::Button("Import Map..."))
-                        SDL_ShowOpenFileDialog(map_dialog_cb, (void*)2, win,
-                                               kMapFilters, 1, nullptr,
+                    if (ImGui::Button("Load Project..."))
+                        SDL_ShowOpenFileDialog(map_dialog_cb, (void*)21, win,
+                                               kProjFilters, 1, nullptr,
                                                false);
-                    ImGui::TextWrapped("Exports everything: terrain, paint "
-                                       "layers, grass, props, view settings "
-                                       "and camera.");
+                    ImGui::TextWrapped("One file for the whole chart: every "
+                                       "cell's terrain, paint layers, grass, "
+                                       "props and their settings, plus the "
+                                       "waterline, spawn and wind.");
                     if (ImGui::SliderFloat("UI Scale", &uiScale,
                                            1.0f, 2.5f, "%.1f"))
                         applyUiScale();
@@ -7324,6 +7472,12 @@ int main(int argc, char** argv)
             running = false;
         }
     }
+
+    // Closing is a save. The chart you had open comes back as you left it
+    // next time, without having to remember to write it anywhere.
+    syncSettingsOut();
+    save_parts();
+    save_project(autosave_project_path());
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
