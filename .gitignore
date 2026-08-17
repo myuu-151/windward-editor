@@ -6,3 +6,5 @@ build/
 # Asset Store pack: fine as a private backup for the licence holder,
 # NOT redistributable -- this repository must stay private.
 
+# models imported from outside are your content, not the editor's
+assets/props/Imported/
