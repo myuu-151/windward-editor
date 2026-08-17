@@ -2822,8 +2822,7 @@ static void save_parts()
     if (!f)
         return;
     for (const auto& kv : gPartFlags)
-        fprintf(f, "part %d %d %s
-", kv.second.first ? 1 : 0,
+        fprintf(f, "part %d %d %s\n", kv.second.first ? 1 : 0,
                 kv.second.second ? 1 : 0, kv.first.c_str());
     fclose(f);
 }
