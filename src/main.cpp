@@ -2607,6 +2607,11 @@ struct PropMaterial {
     // up standing on the leaves -- the parts that are scenery have to say
     // so.
     bool collide = true;
+    // Whether this part stops the camera. The boom shortens against the
+    // baked footprint so the lens never ends up inside anything, which is
+    // right for a hull and wrong for a canopy you want to rotate through.
+    // Independent of collide: ground you walk on need not shove the view.
+    bool camBlock = true;
     unsigned tex = 0;
     bool grayMask = false;
     float kd[3] = { 1, 1, 1 };   // top/main color
@@ -2785,6 +2790,11 @@ static void apply_styles(PropMesh& m)
         }
     }
 }
+
+// The camera footprint from the last bake, appended to the map after
+// everything else so a client that does not know about it reads the file
+// exactly as before and simply stops at the end of the old data.
+static std::vector<float> gCamFoot;
 
 static void save_styles()
 {
@@ -3908,7 +3918,18 @@ static void save_map(const char* path)
         // Deep enough to read as absent, not merely underwater: the
         // client treats ground above -50 as solid, so a footprint whose
         // sea was only a few units down made the whole quadrant walkable.
-        std::vector<float> foot(gHeights.size(), -100.0f);
+        std::vector<float> footMain(gHeights.size(), -100.0f);
+        // A second footprint for the camera alone, baked only when some
+        // part opts out of blocking it -- otherwise the client falls back
+        // to the one field and nothing changes.
+        std::vector<float> footCam;
+        bool camSplit = false;
+        for (const PropInst& pi : gProps)
+            for (const PropMaterial& mm : gPropMeshes[pi.mesh].mats)
+                if (!mm.camBlock && mm.collide)
+                    camSplit = true;
+        if (camSplit)
+            footCam.assign(gHeights.size(), -100.0f);
         // Where the model actually meets the sea. The heightfield can only
         // hold one height per cell and collision needs the top surface, so
         // an overhanging island's deck outline is not its waterline -- and
@@ -3925,6 +3946,8 @@ static void save_map(const char* path)
         // which is what left only an outline in the mask.
         std::vector<float> footLow(gHeights.size(), 1e9f);
         const float cell = 2.0f * TER_HALF / (HN - 1);
+        for (int cpass = 0; cpass < (camSplit ? 2 : 1); cpass++) {
+        std::vector<float>& foot = cpass ? footCam : footMain;
         for (const PropInst& pi : gProps) {
             const PropMesh& pm = gPropMeshes[pi.mesh];
             const float r = pm.boundR * pi.scale;
@@ -3965,9 +3988,13 @@ static void save_map(const char* path)
                     const size_t vi = t / 3;
                     if (vi < pm.ptMat.size()) {
                         const int mi = pm.ptMat[vi];
-                        if (mi >= 0 && mi < (int)pm.mats.size() &&
-                            !pm.mats[mi].collide)
-                            continue;   // scenery, not ground
+                        if (mi >= 0 && mi < (int)pm.mats.size()) {
+                            const PropMaterial& mm = pm.mats[mi];
+                            if (!mm.collide)
+                                continue;   // scenery, not ground
+                            if (cpass == 1 && !mm.camBlock)
+                                continue;   // ground, but the lens passes
+                        }
                     }
                     float a[3], b[3], c[3];
                     place(t, a); place(t + 3, b); place(t + 6, c);
@@ -4073,6 +4100,8 @@ static void save_map(const char* path)
             if (!fixed)
                 break;
         }
+        }
+        std::vector<float>& foot = footMain;
         // No outward growth. Padding the surface past the rim was there to
         // stop falling short of the edge, but it means standing on ground
         // the model does not have -- and a body floating above the surface
@@ -4101,8 +4130,9 @@ static void save_map(const char* path)
             if (v > -50.0f)
                 landCells++;
         fwrite(foot.data(), sizeof(float), foot.size(), f);
-        SDL_Log("saved a props footprint instead of terrain (%d land cells)",
-                landCells);
+        gCamFoot = footCam;   // appended at the end of the file, see below
+        SDL_Log("saved a props footprint instead of terrain (%d land cells)%s",
+                landCells, camSplit ? ", plus a camera field" : "");
     } else {
         fwrite(gHeights.data(), sizeof(float), gHeights.size(), f);
     }
@@ -4133,6 +4163,14 @@ static void save_map(const char* path)
     Uint32 tsz = (Uint32)sizeof gTune;
     fwrite(&tsz, 4, 1, f);
     fwrite(&gTune, tsz, 1, f);
+    // Appended last, behind a tag: older builds read up to here and stop,
+    // so a map with a camera field still loads everywhere.
+    if (!gCamFoot.empty()) {
+        fwrite("CAMBLK01", 1, 8, f);
+        Uint32 cn = (Uint32)gCamFoot.size();
+        fwrite(&cn, 4, 1, f);
+        fwrite(gCamFoot.data(), sizeof(float), gCamFoot.size(), f);
+    }
     fclose(f);
     SDL_Log("saved %s", path);
 }
@@ -6656,6 +6694,11 @@ int main(int argc, char** argv)
                                 "footprint takes the highest surface over "
                                 "each spot, so leaving a canopy on means "
                                 "standing on the leaves.");
+                            ImGui::TextWrapped(
+                                "Blocks camera: the boom shortens against "
+                                "this so the lens never sits inside "
+                                "anything. Turn it off for parts the view "
+                                "should rotate straight through.");
                             for (size_t mi = 0; mi < spm.mats.size(); mi++) {
                                 PropMaterial& mm = spm.mats[mi];
                                 ImGui::PushID((int)(1000 + mi));
@@ -6663,6 +6706,9 @@ int main(int argc, char** argv)
                                                     ? "(unnamed)"
                                                     : mm.name.c_str(),
                                                 &mm.collide);
+                                ImGui::SameLine(220.0f);
+                                ImGui::Checkbox("blocks camera",
+                                                &mm.camBlock);
                                 ImGui::PopID();
                             }
                         }
