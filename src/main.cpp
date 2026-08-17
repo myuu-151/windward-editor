@@ -5140,10 +5140,17 @@ int main(int argc, char** argv)
             if (rd[1] < -0.0001f) {
                 const float t = (gWaterline - camPos[1]) / rd[1];
                 if (t > 0.0f) {
-                    hit[0] = camPos[0] + rd[0] * t;
+                    // Inside the quadrant only. Letting a prop sit
+                    // anywhere the sea does put islands out beyond the map
+                    // -- nothing to bake a footprint from, and in game they
+                    // draw a chart-length away from where you spawn.
+                    hit[0] = SDL_clamp(camPos[0] + rd[0] * t,
+                                       -TER_HALF, TER_HALF);
                     hit[1] = gWaterline;
-                    hit[2] = camPos[2] + rd[2] * t;
-                    hasHit = true;
+                    hit[2] = SDL_clamp(camPos[2] + rd[2] * t,
+                                       -TER_HALF, TER_HALF);
+                    hasHit = fabsf(camPos[0] + rd[0] * t) <= TER_HALF * 1.5f &&
+                             fabsf(camPos[2] + rd[2] * t) <= TER_HALF * 1.5f;
                 }
             }
             if (gShowGround) {
