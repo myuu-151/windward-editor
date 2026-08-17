@@ -3330,9 +3330,14 @@ static bool import_glb_into(PropMesh& m, const std::string& path)
                 const cgltf_pbr_metallic_roughness& pbr =
                     pr.material->pbr_metallic_roughness;
                 const float* bc = pbr.base_color_factor;
+                // A texture carries the colour; the gradient multiplies
+                // it, so leave it white unless a Color Ramp said otherwise.
+                // Tinting by the base-colour factor and darkening the
+                // bottom as well shaded the whole model down twice.
+                const bool hasTex = pbr.base_color_texture.texture != nullptr;
                 for (int k = 0; k < 3; k++) {
-                    mat.kd[k] = bc[k];
-                    mat.ka[k] = bc[k] * 0.72f;   // a little darker underneath
+                    mat.kd[k] = hasTex ? 1.0f : bc[k];
+                    mat.ka[k] = hasTex ? 1.0f : bc[k] * 0.72f;
                 }
                 if (pr.material->name)
                     mat.name = pr.material->name;
