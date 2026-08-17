@@ -3927,6 +3927,7 @@ static void save_map(const char* path)
                                     (c[0] - b[0]) * (a[2] - c[2]);
                     if (fabsf(d) < 1e-9f)
                         continue;      // edge-on, contributes no surface
+                    bool covered = false;
                     for (int j = j0; j <= j1; j++)
                         for (int i = i0; i <= i1; i++) {
                             const float x = -TER_HALF + i * cell;
@@ -3942,7 +3943,25 @@ static void save_map(const char* path)
                             float& hh = foot[(size_t)j * HN + i];
                             if (y > hh)
                                 hh = y;
+                            covered = true;
                         }
+                    if (!covered) {
+                        // A triangle smaller than a cell can miss every
+                        // cell centre and write nothing at all -- which is
+                        // a pinhole in the surface, and exactly where you
+                        // drop through. Claim the cells its corners land in
+                        // so no face goes unrecorded however fine it is.
+                        const float* vs[3] = { a, b, c };
+                        for (const float* v : vs) {
+                            const int i = (int)((v[0] + TER_HALF) / cell + 0.5f);
+                            const int j = (int)((v[2] + TER_HALF) / cell + 0.5f);
+                            if (i < 0 || j < 0 || i >= HN || j >= HN)
+                                continue;
+                            float& hh = foot[(size_t)j * HN + i];
+                            if (v[1] > hh)
+                                hh = v[1];
+                        }
+                    }
                 }
                 continue;
             }
