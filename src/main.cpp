@@ -3468,9 +3468,18 @@ static bool import_glb(const std::string& path)
         const std::string dir = gPropsDir + "/Imported";
         std::filesystem::create_directories(dir, ec);
         const std::string dst = dir + "/" + m.label + ".glb";
-        if (path != dst)
+        if (path != dst) {
             std::filesystem::copy_file(path, dst,
                 std::filesystem::copy_options::overwrite_existing, ec);
+            // The gradient Blender pulled out of each Color Ramp lives
+            // beside the model, and both this editor and the client read it
+            // from beside the model -- copying the glb alone left the
+            // library copy with no gradient at all, so a leaf mask was
+            // drawn as a picture and came out grey.
+            std::error_code ec2;
+            std::filesystem::copy_file(path + ".grad", dst + ".grad",
+                std::filesystem::copy_options::overwrite_existing, ec2);
+        }
         if (ec)
             SDL_Log("import: could not keep a copy in %s (%s)", dir.c_str(),
                     ec.message().c_str());
