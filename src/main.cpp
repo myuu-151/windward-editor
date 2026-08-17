@@ -3914,8 +3914,59 @@ static void save_map(const char* path)
                         h = top;
                 }
         }
+        // Close it into a surface. Stamping vertices leaves single cells
+        // of deck standing in deep water, and anything sampling this
+        // bilinearly -- the client's collision, the shore field -- reads
+        // the average of a deck cell and its -100 neighbour as far below
+        // the sea. So there is no ground anywhere until the gaps between
+        // the stamps are filled in.
+        for (int pass = 0; pass < 12; pass++) {
+            std::vector<float> prev = foot;
+            bool grew = false;
+            for (int j = 1; j < HN - 1; j++)
+                for (int i = 1; i < HN - 1; i++) {
+                    const size_t k = (size_t)j * HN + i;
+                    if (prev[k] > -50.0f)
+                        continue;
+                    float best = -100.0f;
+                    int n = 0;
+                    for (int dj = -1; dj <= 1; dj++)
+                        for (int di = -1; di <= 1; di++) {
+                            const float v = prev[(size_t)(j + dj) * HN + i + di];
+                            if (v > -50.0f) { n++; best = SDL_max(best, v); }
+                        }
+                    // three neighbours means an interior gap, not the edge
+                    if (n >= 3) { foot[k] = best; grew = true; }
+                }
+            if (!grew)
+                break;
+        }
+        // and take the stamp noise out of the surface
+        for (int pass = 0; pass < 2; pass++) {
+            std::vector<float> prev = foot;
+            for (int j = 1; j < HN - 1; j++)
+                for (int i = 1; i < HN - 1; i++) {
+                    const size_t k = (size_t)j * HN + i;
+                    if (prev[k] < -50.0f)
+                        continue;
+                    float sum = 0.0f;
+                    int n = 0;
+                    for (int dj = -1; dj <= 1; dj++)
+                        for (int di = -1; di <= 1; di++) {
+                            const float v = prev[(size_t)(j + dj) * HN + i + di];
+                            if (v > -50.0f) { sum += v; n++; }
+                        }
+                    if (n > 0)
+                        foot[k] = sum / n;
+                }
+        }
+        int landCells = 0;
+        for (float v : foot)
+            if (v > -50.0f)
+                landCells++;
         fwrite(foot.data(), sizeof(float), foot.size(), f);
-        SDL_Log("saved a props footprint instead of terrain");
+        SDL_Log("saved a props footprint instead of terrain (%d land cells)",
+                landCells);
     } else {
         fwrite(gHeights.data(), sizeof(float), gHeights.size(), f);
     }
