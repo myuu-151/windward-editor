@@ -937,6 +937,9 @@ static float gWaterline = -3.0f;   // sea level, world units
 // plane at sea level is not "nothing", it is a floor in the way.
 static bool gShowGround = false;
 
+// Where a prop sits at a spot. With no terrain this is the sea, not the
+// bottom of a heightmap that was sunk out of the way -- placing read the
+// heightmap directly and buried everything a hundred units under water.
 static float height_at(float x, float z)
 {
     float u = (x + TER_HALF) / (2.0f * TER_HALF) * (HN - 1);
@@ -5104,12 +5107,6 @@ int main(int argc, char** argv)
             if (ImGui::GetIO().WantCaptureMouse)
                 hasHit = false;   // cursor over the panel: never paint through
             bool painting = hasHit && (mb & SDL_BUTTON_LMASK) && !shotPath;
-            static bool wasDown = false;
-            const bool isDown = (mb & SDL_BUTTON_LMASK) != 0;
-            if (isDown && !wasDown && activeTab == 3 && !hasHit)
-                SDL_Log("place: no hit (ray missed; ground %d, looking %s)",
-                        gShowGround ? 1 : 0, rd[1] < 0.0f ? "down" : "up");
-            wasDown = isDown;
             bool clickEdge = painting && !wasPainting;
             if (painting && activeTab != 3 && mode == BRUSH_ROAD) {
                 if (!wasPainting) {
@@ -5156,10 +5153,6 @@ int main(int argc, char** argv)
                             keys[SDL_SCANCODE_LSHIFT] != 0, brushStrength,
                             paintTarget);
             } else if (activeTab == 3 && hasHit) {
-                if (clickEdge)
-                    SDL_Log("place: tool %d sel %d hit %.1f %.1f %.1f ground %d",
-                            propTool, propSel, hit[0], hit[1], hit[2],
-                            gShowGround ? 1 : 0);
                 // ---- prop tools
                 if (propTool == 0 && clickEdge && propSel >= 0 &&
                     load_prop(propSel)) {
@@ -5169,8 +5162,10 @@ int main(int argc, char** argv)
                     float sc = propScale *
                         (1.0f + (pRand() - 0.5f) * 2.0f * propScaleRand);
                     gProps.push_back({ propSel, hit[0],
-                                       height_at(hit[0], hit[2]), hit[2],
-                                       yaw, sc });
+                                       gShowGround
+                                           ? height_at(hit[0], hit[2])
+                                           : hit[1],
+                                       hit[2], yaw, sc });
                     selInst = (int)gProps.size() - 1;
                 } else if (propTool == 1 && painting && propSel >= 0 &&
                            load_prop(propSel)) {
@@ -5197,7 +5192,9 @@ int main(int argc, char** argv)
                             continue;
                         float sc = propScale *
                             (1.0f + (pRand() - 0.5f) * 2.0f * propScaleRand);
-                        gProps.push_back({ propSel, px, height_at(px, pz),
+                        gProps.push_back({ propSel, px,
+                                           gShowGround ? height_at(px, pz)
+                                                       : gWaterline,
                                            pz, pRand() * 6.2831853f, sc });
                     }
                 } else if (propTool == 2 && painting) {
