@@ -4308,8 +4308,7 @@ static void save_world(const char* path)
     for (int wy = 0; wy < gWorldSize; wy++)
         for (int wx = 0; wx < gWorldSize; wx++)
             if (gWorldWind[wy][wx] > 0.01f)
-                fprintf(f, "wind %d %d %f
-", wx, wy,
+                fprintf(f, "wind %d %d %f\n", wx, wy,
                         gWorldWind[wy][wx]);
     for (int y = 0; y < gWorldSize; y++)
         for (int x = 0; x < gWorldSize; x++)
