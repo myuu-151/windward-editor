@@ -2594,6 +2594,11 @@ static void update_stamp_thumbnails()
 // lazy-loaded per mesh; instances live in the map.
 
 struct PropMaterial {
+    // Whether this part of the model is ground. The footprint takes the
+    // highest vertex over each cell, so a tree's canopy wins and you end
+    // up standing on the leaves -- the parts that are scenery have to say
+    // so.
+    bool collide = true;
     unsigned tex = 0;
     bool grayMask = false;
     float kd[3] = { 1, 1, 1 };   // top/main color
@@ -2614,6 +2619,7 @@ struct PropMesh {
     std::vector<PropMaterial> mats;
     float boundR = 1.0f, boundH = 1.0f;
     std::vector<float> pts;   // xyz per vertex, kept for footprint baking
+    std::vector<int> ptMat;   // which material each of those came from
 };
 struct PropCategory {
     std::string name;
@@ -3397,6 +3403,7 @@ static bool import_glb_into(PropMesh& m, const std::string& path)
                                           t2[0], t2[1],
                                           c4[0], c4[1], c4[2] });
                 m.pts.insert(m.pts.end(), { p3[0], p3[1], p3[2] });
+                m.ptMat.push_back(matIdx);
             }
             sub.count = (int)(data.size() / 11) - sub.first;
             if (sub.count > 0)
@@ -3864,6 +3871,13 @@ static void save_map(const char* path)
             if (!pm.pts.empty()) {
                 const float cs = cosf(pi.yaw), sn = sinf(pi.yaw);
                 for (size_t v = 0; v + 2 < pm.pts.size(); v += 3) {
+                    const size_t vi = v / 3;
+                    if (vi < pm.ptMat.size()) {
+                        const int mi = pm.ptMat[vi];
+                        if (mi >= 0 && mi < (int)pm.mats.size() &&
+                            !pm.mats[mi].collide)
+                            continue;   // scenery, not ground
+                    }
                     const float lx = pm.pts[v] * pi.scale;
                     const float ly = pm.pts[v + 1] * pi.scale;
                     const float lz = pm.pts[v + 2] * pi.scale;
@@ -6381,6 +6395,23 @@ int main(int argc, char** argv)
                         ImGui::CollapsingHeader("Style Presets") &&
                         load_prop(propSel)) {
                         PropMesh& spm = gPropMeshes[propSel];
+                        if (!spm.ptMat.empty()) {
+                            ImGui::SeparatorText("Collision");
+                            ImGui::TextWrapped(
+                                "Which parts of this model are ground. The "
+                                "footprint takes the highest surface over "
+                                "each spot, so leaving a canopy on means "
+                                "standing on the leaves.");
+                            for (size_t mi = 0; mi < spm.mats.size(); mi++) {
+                                PropMaterial& mm = spm.mats[mi];
+                                ImGui::PushID((int)(1000 + mi));
+                                ImGui::Checkbox(mm.name.empty()
+                                                    ? "(unnamed)"
+                                                    : mm.name.c_str(),
+                                                &mm.collide);
+                                ImGui::PopID();
+                            }
+                        }
                         for (int role = 0; role < 3; role++) {
                             PropMaterial* rep = nullptr;
                             for (PropMaterial& mm : spm.mats)
