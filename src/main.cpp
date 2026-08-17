@@ -2796,6 +2796,74 @@ static void apply_styles(PropMesh& m)
 // exactly as before and simply stops at the end of the old data.
 static std::vector<float> gCamFoot;
 
+// Which parts of each model are ground and which stop the camera, kept in
+// props/parts.txt beside the style presets. These used to live only in
+// memory, so every editor restart put them back to solid and a map saved
+// afterwards quietly shipped the wrong flags.
+static std::unordered_map<std::string, std::pair<bool, bool>>
+    gPartFlags;
+
+static std::string part_key(const PropMesh& pm, const PropMaterial& mm)
+{
+    return pm.category + "/" + pm.label + "|" + mm.name;
+}
+
+static void save_parts()
+{
+    // take what the loaded meshes currently show, keeping anything for
+    // models this session never opened
+    for (const PropMesh& pm : gPropMeshes) {
+        if (!pm.loaded)
+            continue;
+        for (const PropMaterial& mm : pm.mats)
+            gPartFlags[part_key(pm, mm)] = { mm.collide, mm.camBlock };
+    }
+    FILE* f = fopen((gPropsDir + "/parts.txt").c_str(), "wb");
+    if (!f)
+        return;
+    for (const auto& kv : gPartFlags)
+        fprintf(f, "part %d %d %s
+", kv.second.first ? 1 : 0,
+                kv.second.second ? 1 : 0, kv.first.c_str());
+    fclose(f);
+}
+
+static void load_parts()
+{
+    FILE* f = fopen((gPropsDir + "/parts.txt").c_str(), "rb");
+    if (!f)
+        return;
+    char line[1024];
+    while (fgets(line, sizeof line, f)) {
+        int c = 1, k = 1, off = 0;
+        if (sscanf(line, "part %d %d %n", &c, &k, &off) == 2 && off > 0) {
+            std::string key(line + off);
+            while (!key.empty() && (key.back() == '
+' || key.back() == '
+'))
+                key.pop_back();
+            if (!key.empty())
+                gPartFlags[key] = { c != 0, k != 0 };
+        }
+    }
+    fclose(f);
+    SDL_Log("loaded %d part flags", (int)gPartFlags.size());
+}
+
+// applied whenever a model's materials come into being
+static void apply_part_flags(PropMesh& pm)
+{
+    for (PropMaterial& mm : pm.mats) {
+        auto it = gPartFlags.find(part_key(pm, mm));
+        if (it != gPartFlags.end()) {
+            mm.collide = it->second.first;
+            mm.camBlock = it->second.second;
+        }
+    }
+}
+
+static void apply_part_flags(PropMesh& pm);
+
 static void save_styles()
 {
     FILE* f = fopen((gPropsDir + "/styles.txt").c_str(), "wb");
@@ -2933,6 +3001,7 @@ static bool load_prop(int idx)
     glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, 11 * sizeof(float),
                           (void*)(8 * sizeof(float)));
     glBindVertexArray(0);
+    apply_part_flags(m);   // whatever was ticked last session
     m.loaded = true;
     return true;
 }
@@ -3462,6 +3531,7 @@ static bool import_glb_into(PropMesh& m, const std::string& path)
     glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, 11 * sizeof(float),
                           (void*)(8 * sizeof(float)));
     glBindVertexArray(0);
+    apply_part_flags(m);   // whatever was ticked last session
     m.loaded = true;
 
     return true;
@@ -3575,6 +3645,7 @@ static void scan_props(const std::string& dir)
             gPropTexFiles.push_back(e.path().filename().string());
     std::sort(gPropTexFiles.begin(), gPropTexFiles.end());
     load_styles();
+    load_parts();
     SDL_Log("props: %d meshes in %d categories",
             (int)gPropMeshes.size(), (int)gPropCats.size());
 }
@@ -5325,7 +5396,11 @@ int main(int argc, char** argv)
                     do_redo();
                     refresh_if_resized();
                 }
-                if (e.key.key == SDLK_F5) { syncSettingsOut(); save_map(mapPath); }
+                if (e.key.key == SDLK_F5) {
+                    syncSettingsOut();
+                    save_parts();     // the part toggles travel with it
+                    save_map(mapPath);
+                }
                 if (e.key.key == SDLK_F9) { load_map(mapPath); applySettingsIn(); }
                 if (e.key.key == SDLK_LEFTBRACKET)
                     brushRadius = SDL_max(0.4f, brushRadius - 0.4f);
