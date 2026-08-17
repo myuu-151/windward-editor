@@ -648,11 +648,34 @@ void main() {
 static const char* WATER_FS = R"(#version 330 core
 in vec2 vXz;
 out vec4 fragColor;
+uniform vec4  uBrush;    // xz, radius, active
+uniform vec3  uBrushCol;
+uniform float uHalf;     // the quadrant's extent
+uniform float uEdge;     // draw its boundary
 void main() {
     // basic sea blue, slightly lighter toward the horizon distance
     float d = length(vXz);
     vec3 col = mix(vec3(0.10, 0.38, 0.72), vec3(0.30, 0.55, 0.85),
                    smoothstep(40.0, 160.0, d));
+    // The canvas edge. Props can only be placed inside the quadrant, but
+    // the sea is drawn far past it, so without this the boundary is
+    // invisible and clicks outside look like they simply do nothing.
+    if (uEdge > 0.5) {
+        vec2 q = abs(vXz);
+        float b = max(q.x, q.y);
+        float line = (1.0 - smoothstep(uHalf - 0.35, uHalf, b)) *
+                     smoothstep(uHalf - 0.9, uHalf - 0.4, b);
+        col = mix(col, vec3(0.95, 0.95, 0.75), line * 0.85);
+        if (q.x < uHalf && q.y < uHalf)
+            col = mix(col, vec3(0.16, 0.44, 0.74), 0.25);
+    }
+    // and the brush cursor, which otherwise only ever drew on terrain
+    if (uBrush.w > 0.5) {
+        float bd = length(vXz - uBrush.xy);
+        float ring = smoothstep(uBrush.z * 0.92, uBrush.z * 0.97, bd) *
+                     (1.0 - smoothstep(uBrush.z * 1.03, uBrush.z * 1.08, bd));
+        col = mix(col, uBrushCol, ring * 0.9);
+    }
     fragColor = vec4(col, 1.0);
 }
 )";
@@ -5593,6 +5616,14 @@ int main(int argc, char** argv)
                         gWaterline);
             glUniform1f(glGetUniformLocation(waterProg, "uExtent"),
                         TER_HALF * 8.0f);
+            glUniform1f(glGetUniformLocation(waterProg, "uHalf"), TER_HALF);
+            glUniform1f(glGetUniformLocation(waterProg, "uEdge"),
+                        gShowGround ? 0.0f : 1.0f);
+            glUniform4f(glGetUniformLocation(waterProg, "uBrush"),
+                        hit[0], hit[2], brushRadius,
+                        hasHit && !shotPath ? 1.0f : 0.0f);
+            glUniform3fv(glGetUniformLocation(waterProg, "uBrushCol"), 1,
+                         kBrushColors[mode]);
             glBindVertexArray(emptyVao);
             glDrawArrays(GL_TRIANGLES, 0, 6);
         }
