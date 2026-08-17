@@ -935,7 +935,7 @@ static float gWaterline = -3.0f;   // sea level, world units
 // A quadrant can hold nothing but props -- a level built entirely out of
 // imported geometry wants no ground plane under it at all, and a flat
 // plane at sea level is not "nothing", it is a floor in the way.
-static bool gShowGround = true;
+static bool gShowGround = false;
 
 static float height_at(float x, float z)
 {
@@ -3921,7 +3921,15 @@ static bool load_map(const char* path)
     }
     fclose(f);
     gHeightsDirty = gMaskDirty = gMask2Dirty = gKillDirty = true;
-    SDL_Log("loaded %s", path);
+    // Ground is something a map either has or does not. A sculpted island
+    // brings its terrain with it; a quadrant built out of props has no
+    // land above the water and gets none drawn, no sculpt tools and
+    // nothing under the cursor but the sea.
+    gShowGround = false;
+    for (float h : gHeights)
+        if (h > gWaterline + 0.05f) { gShowGround = true; break; }
+    SDL_Log("loaded %s (%s)", path,
+            gShowGround ? "has terrain" : "props only");
     return true;
 }
 
@@ -4892,22 +4900,6 @@ int main(int argc, char** argv)
             applySettingsIn();   // startup load must restore the sliders too
         }
         gMapResized = false;
-        // Nothing worth showing? Generate a level rather than opening on
-        // an empty plane: the island, its road, its cave and its groves,
-        // live on the sliders so it can be pushed around immediately.
-        if (!map_has_content()) {
-            gGenBase = gHeights;
-            gGenMask = gMask; gGenMask2 = gMask2; gGenKill = gKill;
-            gGenProps = gProps;
-            gGen.on = true;
-            apply_generator(gWaterline);
-            activeTab = 0;
-            camPos[0] = 0.0f;
-            camPos[1] = TER_HALF * 0.75f + gGen.height;
-            camPos[2] = TER_HALF * 1.5f;
-            pitch = -0.45f;
-            SDL_Log("opened on a generated island (seed %d)", gGen.seed);
-        }
     }
     SDL_Log("gen defaults in effect: seed %d size %.2f height %.1f terr %.2f "
             "detail %d fscale %.2f plateau %.2f", gGen.seed, gGen.size,
