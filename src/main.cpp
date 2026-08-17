@@ -5043,7 +5043,11 @@ int main(int argc, char** argv)
             };
             float len = sqrtf(rd[0] * rd[0] + rd[1] * rd[1] + rd[2] * rd[2]);
             rd[0] /= len; rd[1] /= len; rd[2] /= len;
-            hasHit = ray_terrain(camPos, rd, hit);
+            // With no ground, do not raycast the terrain at all: it is
+            // still there, sunk far below the sea, and the ray happily
+            // hits it -- which put props a hundred units under the water
+            // instead of on the waterline.
+            hasHit = gShowGround ? ray_terrain(camPos, rd, hit) : false;
             if (!hasHit && !gShowGround && rd[1] < -0.0001f) {
                 // With the ground gone there is nothing to raycast, so the
                 // brush would have nowhere to land and props could not be
