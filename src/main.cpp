@@ -3410,7 +3410,9 @@ static bool import_glb_into(PropMesh& m, const std::string& path)
                     hi[c] = SDL_max(hi[c], p3[c]);
                 }
                 float c4[4] = { 1, 1, 1, 1 };
-                if (col)
+                // only where no texture carries the colour: multiplying a
+                // texture by baked vertex shading darkens the whole model
+                if (col && !mat.tex)
                     cgltf_accessor_read_float(col, v, c4, 4);
                 data.insert(data.end(), { p3[0], p3[1], p3[2],
                                           n3[0], n3[1], n3[2],
