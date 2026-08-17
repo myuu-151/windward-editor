@@ -3901,9 +3901,15 @@ static void save_map(const char* path)
                     const float lx = pm.pts[v] * pi.scale;
                     const float ly = pm.pts[v + 1] * pi.scale;
                     const float lz = pm.pts[v + 2] * pi.scale;
-                    o[0] = pi.x + lx * cs - lz * sn;
+                    // Exactly the rotation model_trs draws with. This had
+                    // the signs the other way round -- the transpose, i.e.
+                    // a turn of -yaw -- so the collision and the shore
+                    // field it feeds were rotated away from the model you
+                    // can see. On a prop turned most of the way round that
+                    // is ground and foam in entirely the wrong place.
+                    o[0] = pi.x + lx * cs + lz * sn;
                     o[1] = pi.y + ly;
-                    o[2] = pi.z + lx * sn + lz * cs;
+                    o[2] = pi.z - lx * sn + lz * cs;
                 };
                 for (size_t t = 0; t + 8 < pm.pts.size(); t += 9) {
                     const size_t vi = t / 3;
