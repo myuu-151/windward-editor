@@ -3982,6 +3982,33 @@ static void save_map(const char* path)
                         h = top;
                 }
         }
+        // Close whatever the rasteriser still left open. Even with every
+        // triangle recorded, a cell can end up empty where faces meet at an
+        // angle, and a single empty cell in the middle of a surface is a
+        // hole you fall through -- the client samples this bilinearly, so
+        // one -100 neighbour drags the interpolated ground far below.
+        for (int pass = 0; pass < 6; pass++) {
+            std::vector<float> prev = foot;
+            int fixed = 0;
+            for (int j = 1; j < HN - 1; j++)
+                for (int i = 1; i < HN - 1; i++) {
+                    const size_t k = (size_t)j * HN + i;
+                    if (prev[k] > -50.0f)
+                        continue;
+                    float best = -100.0f;
+                    int n = 0;
+                    for (int dj = -1; dj <= 1; dj++)
+                        for (int di = -1; di <= 1; di++) {
+                            const float v = prev[(size_t)(j + dj) * HN + i + di];
+                            if (v > -50.0f) { n++; best = SDL_max(best, v); }
+                        }
+                    // five of eight neighbours means this is inside the
+                    // surface, not along its edge
+                    if (n >= 5) { foot[k] = best; fixed++; }
+                }
+            if (!fixed)
+                break;
+        }
         int landCells = 0;
         for (float v : foot)
             if (v > -50.0f)
