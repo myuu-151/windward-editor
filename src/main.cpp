@@ -3477,11 +3477,34 @@ static bool import_glb(const std::string& path)
         else
             m.objPath = dst;
     }
-    gPropMeshes.push_back(m);
-    const int idx = (int)gPropMeshes.size() - 1;
+    // Re-importing a model already brought in replaces it. Appending gave
+    // two entries with the same name, both selectable and both fighting for
+    // the same interface id -- which is the conflict the panel complained
+    // about.
+    int idx = -1;
+    for (int i = 0; i < (int)gPropMeshes.size(); i++)
+        if (gPropMeshes[i].category == "Imported" &&
+            gPropMeshes[i].label == m.label) {
+            if (gPropMeshes[i].vao)
+                glDeleteVertexArrays(1, &gPropMeshes[i].vao);
+            if (gPropMeshes[i].vbo)
+                glDeleteBuffers(1, &gPropMeshes[i].vbo);
+            gPropMeshes[i] = m;
+            idx = i;
+            break;
+        }
+    if (idx < 0) {
+        gPropMeshes.push_back(m);
+        idx = (int)gPropMeshes.size() - 1;
+    }
     bool placed = false;
     for (PropCategory& c : gPropCats)
-        if (c.name == "Imported") { c.meshes.push_back(idx); placed = true; }
+        if (c.name == "Imported") {
+            placed = true;
+            if (std::find(c.meshes.begin(), c.meshes.end(), idx) ==
+                c.meshes.end())
+                c.meshes.push_back(idx);
+        }
     if (!placed) {
         PropCategory c;
         c.name = "Imported";
@@ -6479,6 +6502,49 @@ int main(int argc, char** argv)
                             "material's base colour; textures are not "
                             "unpacked yet, so a textured model arrives "
                             "flat-shaded.");
+                    ImGui::SameLine();
+                    if (ImGui::Button("Clear Imports")) {
+                        // Everything brought in from outside: the models on
+                        // disk, their library entries, and anything placed
+                        // that referenced them -- so an import can start
+                        // from a clean slate.
+                        std::error_code ecx;
+                        std::filesystem::remove_all(gPropsDir + "/Imported", ecx);
+                        std::vector<int> gone;
+                        for (int i = 0; i < (int)gPropMeshes.size(); i++)
+                            if (gPropMeshes[i].category == "Imported")
+                                gone.push_back(i);
+                        for (int i : gone) {
+                            PropMesh& gm = gPropMeshes[i];
+                            if (gm.vao) glDeleteVertexArrays(1, &gm.vao);
+                            if (gm.vbo) glDeleteBuffers(1, &gm.vbo);
+                            gm.vao = 0; gm.vbo = 0;
+                            gm.loaded = false;
+                            gm.failed = true;
+                            gm.subs.clear();
+                            gm.mats.clear();
+                            gm.pts.clear();
+                            gm.ptMat.clear();
+                        }
+                        gProps.erase(
+                            std::remove_if(gProps.begin(), gProps.end(),
+                                [&](const PropInst& pi) {
+                                    return std::find(gone.begin(), gone.end(),
+                                                     pi.mesh) != gone.end();
+                                }),
+                            gProps.end());
+                        for (auto it = gPropCats.begin(); it != gPropCats.end();)
+                            it = (it->name == "Imported") ? gPropCats.erase(it)
+                                                          : it + 1;
+                        propCat = 0;
+                        propSel = -1;
+                        selInst = -1;
+                        SDL_Log("cleared %d imported models", (int)gone.size());
+                    }
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Deletes imported models, their "
+                                          "library entries and anything "
+                                          "placed from them.");
                     ImGui::SameLine();
                     if (ImGui::Button("Import .blend..."))
                         SDL_ShowOpenFileDialog(map_dialog_cb, (void*)7, win,
