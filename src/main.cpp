@@ -2782,11 +2782,20 @@ static void load_styles()
     SDL_Log("loaded %d style presets", (int)gStyles.size());
 }
 
+static bool import_glb_into(PropMesh& m, const std::string& path);
+
 static bool load_prop(int idx)
 {
     PropMesh& m = gPropMeshes[idx];
     if (m.loaded || m.failed)
         return m.loaded;
+    if (m.objPath.size() > 4 &&
+        m.objPath.compare(m.objPath.size() - 4, 4, ".glb") == 0) {
+        if (import_glb_into(m, m.objPath))
+            return true;
+        m.failed = true;
+        return false;
+    }
     FILE* f = fopen(m.objPath.c_str(), "rb");
     if (!f) {
         m.failed = true;
@@ -3116,6 +3125,7 @@ static unsigned glb_texture(const cgltf_image* img, const std::string& dir,
 }
 
 static bool import_glb(const std::string& path);
+static bool import_glb_into(PropMesh& m, const std::string& path);
 
 // A .blend is Blender's own working format -- there is no reading it from
 // outside. Blender itself will convert one though, so this runs it in the
@@ -3200,7 +3210,9 @@ static bool import_blend(const std::string& path)
     return import_glb(out);
 }
 
-static bool import_glb(const std::string& path)
+// Fills a mesh from a glb. Split out so the library can reload one it
+// already knows about, not only bring a new one in.
+static bool import_glb_into(PropMesh& m, const std::string& path)
 {
     cgltf_options opt{};
     cgltf_data* d = nullptr;
@@ -3232,7 +3244,6 @@ static bool import_glb(const std::string& path)
         size_t a = dir.find_last_of("/\\");
         dir = a == std::string::npos ? std::string(".") : dir.substr(0, a);
     }
-    PropMesh m;
     m.category = "Imported";
     {
         size_t a = path.find_last_of("/\\");
@@ -3394,6 +3405,14 @@ static bool import_glb(const std::string& path)
     glBindVertexArray(0);
     m.loaded = true;
 
+    return true;
+}
+
+static bool import_glb(const std::string& path)
+{
+    PropMesh m;
+    if (!import_glb_into(m, path))
+        return false;
     // Keep the model in the prop library on disk, not just in memory.
     // A map stores props by "category/label" and the client resolves that
     // against files it can find -- an import that lives only in this
@@ -3423,8 +3442,7 @@ static bool import_glb(const std::string& path)
         c.meshes.push_back(idx);
         gPropCats.push_back(c);
     }
-    SDL_Log("imported %s: %d verts, %d parts", m.label.c_str(),
-            (int)(data.size() / 11), (int)m.subs.size());
+    SDL_Log("imported %s: %d parts", m.label.c_str(), (int)m.subs.size());
     return true;
 }
 
@@ -3442,8 +3460,12 @@ static void scan_props(const std::string& dir)
         PropCategory cat;
         cat.name = c;
         std::vector<fs::path> objs;
+        // glb as well as obj: an imported model is kept in the library
+        // as a glb, and indexing only obj meant it vanished from the
+        // editor on the next run -- nothing to select, nothing to place
         for (const auto& e : fs::directory_iterator(dir + "/" + c, ec))
-            if (e.path().extension() == ".obj")
+            if (e.path().extension() == ".obj" ||
+                e.path().extension() == ".glb")
                 objs.push_back(e.path());
         std::sort(objs.begin(), objs.end());
         for (const auto& p : objs) {
