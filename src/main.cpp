@@ -3765,7 +3765,46 @@ static void save_map(const char* path)
     { float h = TER_HALF; Uint32 r[3] = { (Uint32)HN, (Uint32)MASK_N,
                                           (Uint32)GRID_N };
       fwrite(&h, 4, 1, f); fwrite(r, 4, 3, f); }
-    fwrite(gHeights.data(), sizeof(float), gHeights.size(), f);
+    // A props-only quadrant has no sculpted ground, but the client reads
+    // the heightmap for three things it still needs: the shore field that
+    // draws foam and ripples, the sea shading at range, and collision.
+    // The built-in test island works exactly this way -- a mesh with a
+    // baked heightfield that exists only for those. So rather than saving
+    // the sunk plane, stamp the props' own footprint into it: land under
+    // what was placed, open water everywhere else. Nothing downstream has
+    // to change, because it is the same data the client always consumed.
+    if (!gShowGround && !gProps.empty()) {
+        std::vector<float> foot(gHeights.size(), gWaterline - 6.0f);
+        const float cell = 2.0f * TER_HALF / (HN - 1);
+        for (const PropInst& pi : gProps) {
+            const PropMesh& pm = gPropMeshes[pi.mesh];
+            const float r = pm.boundR * pi.scale;
+            // only things big enough to be ground: a tree is scenery
+            // standing ON the island, not part of its footprint
+            if (r < 2.5f)
+                continue;
+            const float top = pi.y + pm.boundH * pi.scale * 0.55f;
+            const int i0 = SDL_clamp((int)((pi.x - r + TER_HALF) / cell), 0, HN - 1);
+            const int i1 = SDL_clamp((int)((pi.x + r + TER_HALF) / cell) + 1, 0, HN - 1);
+            const int j0 = SDL_clamp((int)((pi.z - r + TER_HALF) / cell), 0, HN - 1);
+            const int j1 = SDL_clamp((int)((pi.z + r + TER_HALF) / cell) + 1, 0, HN - 1);
+            for (int j = j0; j <= j1; j++)
+                for (int i = i0; i <= i1; i++) {
+                    const float x = -TER_HALF + i * cell;
+                    const float z = -TER_HALF + j * cell;
+                    const float dx = x - pi.x, dz = z - pi.z;
+                    if (dx * dx + dz * dz > r * r)
+                        continue;
+                    float& h = foot[(size_t)j * HN + i];
+                    if (top > h)
+                        h = top;
+                }
+        }
+        fwrite(foot.data(), sizeof(float), foot.size(), f);
+        SDL_Log("saved a props footprint instead of terrain");
+    } else {
+        fwrite(gHeights.data(), sizeof(float), gHeights.size(), f);
+    }
     fwrite(gMask.data(), 1, gMask.size(), f);
     fwrite(gKill.data(), 1, gKill.size(), f);
     fwrite(gMask2.data(), 1, gMask2.size(), f);
