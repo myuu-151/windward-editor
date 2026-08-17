@@ -3392,6 +3392,24 @@ static bool import_glb(const std::string& path)
     glBindVertexArray(0);
     m.loaded = true;
 
+    // Keep the model in the prop library on disk, not just in memory.
+    // A map stores props by "category/label" and the client resolves that
+    // against files it can find -- an import that lives only in this
+    // session is dropped when the island is loaded in game.
+    {
+        std::error_code ec;
+        const std::string dir = gPropsDir + "/Imported";
+        std::filesystem::create_directories(dir, ec);
+        const std::string dst = dir + "/" + m.label + ".glb";
+        if (path != dst)
+            std::filesystem::copy_file(path, dst,
+                std::filesystem::copy_options::overwrite_existing, ec);
+        if (ec)
+            SDL_Log("import: could not keep a copy in %s (%s)", dir.c_str(),
+                    ec.message().c_str());
+        else
+            m.objPath = dst;
+    }
     gPropMeshes.push_back(m);
     const int idx = (int)gPropMeshes.size() - 1;
     bool placed = false;
