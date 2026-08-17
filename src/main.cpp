@@ -44,6 +44,11 @@
 // grass, so sculpting and painting keep the same detail per world unit
 // at any size.
 static float TER_HALF = 24.0f;       // the ground is 2*TER_HALF on a side
+// How far a quadrant reaches, drawn as the line on the water and used to
+// decide where a prop may be placed. Separate from TER_HALF, which sizes
+// the terrain grid: changing that resamples the heightfield and scales
+// everything standing on it, which is not what wanting more room means.
+static float gCellHalf = TER_HALF;
 static int   GRID_N   = 256;         // terrain quads per side
 static int   HN       = 257;         // height samples per side
 static int   MASK_N   = 512;         // splat mask resolution
@@ -4240,6 +4245,10 @@ static void save_map(const char* path)
     fwrite(&gTune, tsz, 1, f);
     // Appended last, behind a tag: older builds read up to here and stop,
     // so a map with a camera field still loads everywhere.
+    {
+        fwrite("CELLSZ01", 1, 8, f);
+        fwrite(&gCellHalf, sizeof(float), 1, f);
+    }
     if (!gCamFoot.empty()) {
         fwrite("CAMBLK01", 1, 8, f);
         Uint32 cn = (Uint32)gCamFoot.size();
@@ -5705,10 +5714,10 @@ int main(int argc, char** argv)
                     // -- nothing to bake a footprint from, and in game they
                     // draw a chart-length away from where you spawn.
                     hit[0] = SDL_clamp(camPos[0] + rd[0] * t,
-                                       -TER_HALF, TER_HALF);
+                                       -gCellHalf, gCellHalf);
                     hit[1] = gWaterline;
                     hit[2] = SDL_clamp(camPos[2] + rd[2] * t,
-                                       -TER_HALF, TER_HALF);
+                                       -gCellHalf, gCellHalf);
                     // clamped, never refused: rejecting a click that met
                     // the sea beyond the quadrant meant most of the screen
                     // did nothing, since the camera sits well back
@@ -6131,7 +6140,7 @@ int main(int argc, char** argv)
                         gWaterline);
             glUniform1f(glGetUniformLocation(waterProg, "uExtent"),
                         TER_HALF * 8.0f);
-            glUniform1f(glGetUniformLocation(waterProg, "uHalf"), TER_HALF);
+            glUniform1f(glGetUniformLocation(waterProg, "uHalf"), gCellHalf);
             glUniform1f(glGetUniformLocation(waterProg, "uEdge"),
                         gShowGround ? 0.0f : 1.0f);
             glUniform4f(glGetUniformLocation(waterProg, "uBrush"),
@@ -7144,6 +7153,21 @@ int main(int argc, char** argv)
                             ImGui::PopID();
                             ImGui::PopStyleColor();
                         }
+                    }
+                    ImGui::Separator();
+                    {
+                        float across = gCellHalf * 2.0f;
+                        if (ImGui::SliderFloat("Quadrant size", &across,
+                                               40.0f, 400.0f, "%.0f units")) {
+                            gCellHalf = SDL_max(10.0f, across * 0.5f);
+                        }
+                        ImGui::TextWrapped(
+                            "How far this quadrant reaches -- the line on "
+                            "the water, and how far out props may be "
+                            "placed. Nothing already placed moves or "
+                            "changes size.");
+                        if (ImGui::SmallButton("Match terrain"))
+                            gCellHalf = TER_HALF;
                     }
                     ImGui::Separator();
                     {
