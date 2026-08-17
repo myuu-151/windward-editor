@@ -2590,6 +2590,7 @@ struct PropMesh {
     std::vector<PropSubmesh> subs;
     std::vector<PropMaterial> mats;
     float boundR = 1.0f, boundH = 1.0f;
+    std::vector<float> pts;   // xyz per vertex, kept for footprint baking
 };
 struct PropCategory {
     std::string name;
@@ -3361,6 +3362,7 @@ static bool import_glb(const std::string& path)
                                           n3[0], n3[1], n3[2],
                                           t2[0], t2[1],
                                           c4[0], c4[1], c4[2] });
+                m.pts.insert(m.pts.end(), { p3[0], p3[1], p3[2] });
             }
             sub.count = (int)(data.size() / 11) - sub.first;
             if (sub.count > 0)
@@ -3808,6 +3810,31 @@ static void save_map(const char* path)
             // standing ON the island, not part of its footprint
             if (r < 2.5f)
                 continue;
+            // Stamp the model itself where we have its geometry: a
+            // bounding circle leaves you walking on invisible ground well
+            // past the edge, and puts the surface at an average height
+            // rather than the one you can see. Each vertex claims its own
+            // cell at its own height; the mesh is dense enough that the
+            // outline comes out as the model's own.
+            if (!pm.pts.empty()) {
+                const float cs = cosf(pi.yaw), sn = sinf(pi.yaw);
+                for (size_t v = 0; v + 2 < pm.pts.size(); v += 3) {
+                    const float lx = pm.pts[v] * pi.scale;
+                    const float ly = pm.pts[v + 1] * pi.scale;
+                    const float lz = pm.pts[v + 2] * pi.scale;
+                    const float wx = pi.x + lx * cs - lz * sn;
+                    const float wz = pi.z + lx * sn + lz * cs;
+                    const float wy = pi.y + ly;
+                    const int i = (int)((wx + TER_HALF) / cell + 0.5f);
+                    const int j = (int)((wz + TER_HALF) / cell + 0.5f);
+                    if (i < 0 || j < 0 || i >= HN || j >= HN)
+                        continue;
+                    float& h = foot[(size_t)j * HN + i];
+                    if (wy > h)
+                        h = wy;
+                }
+                continue;
+            }
             const float top = pi.y + pm.boundH * pi.scale * 0.55f;
             const int i0 = SDL_clamp((int)((pi.x - r + TER_HALF) / cell), 0, HN - 1);
             const int i1 = SDL_clamp((int)((pi.x + r + TER_HALF) / cell) + 1, 0, HN - 1);
