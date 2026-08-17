@@ -2837,9 +2837,8 @@ static void load_parts()
         int c = 1, k = 1, off = 0;
         if (sscanf(line, "part %d %d %n", &c, &k, &off) == 2 && off > 0) {
             std::string key(line + off);
-            while (!key.empty() && (key.back() == '
-' || key.back() == '
-'))
+            while (!key.empty() && (key.back() == '\n' ||
+                                    key.back() == '\r'))
                 key.pop_back();
             if (!key.empty())
                 gPartFlags[key] = { c != 0, k != 0 };
