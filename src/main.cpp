@@ -4304,6 +4304,13 @@ static void save_world(const char* path)
     fprintf(f, "wworld 1\nsize %d\nloop 1\nwaterline %f\n", gWorldSize,
             gWaterline);
     fprintf(f, "testisland %d %d\n", gTestCell[0], gTestCell[1]);
+    // per-quadrant wind ribbon height, where a quadrant has set one
+    for (int wy = 0; wy < gWorldSize; wy++)
+        for (int wx = 0; wx < gWorldSize; wx++)
+            if (gWorldWind[wy][wx] > 0.01f)
+                fprintf(f, "wind %d %d %f
+", wx, wy,
+                        gWorldWind[wy][wx]);
     for (int y = 0; y < gWorldSize; y++)
         for (int x = 0; x < gWorldSize; x++)
             if (!gWorldCells[y][x].empty())
