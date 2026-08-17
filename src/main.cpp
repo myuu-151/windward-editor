@@ -3918,14 +3918,7 @@ static void save_map(const char* path)
         // Deep enough to read as absent, not merely underwater: the
         // client treats ground above -50 as solid, so a footprint whose
         // sea was only a few units down made the whole quadrant walkable.
-        // Built as "lowest surface above the water", with 1e9 meaning
-        // nothing found yet; converted to the -100 open-water sentinel once
-        // the props are in. Taking the highest made a branch the ground
-        // beneath it, and because a canopy tapers to deck height at its rim
-        // it did so as a gentle climb, which no step limit can tell from a
-        // hill. The lowest surface is the one you can actually stand on.
-        constexpr float kNone = 1e9f;
-        std::vector<float> footMain(gHeights.size(), kNone);
+        std::vector<float> footMain(gHeights.size(), -100.0f);
         // A second footprint for the camera alone, baked only when some
         // part opts out of blocking it -- otherwise the client falls back
         // to the one field and nothing changes.
@@ -3936,7 +3929,7 @@ static void save_map(const char* path)
                 if (!mm.camBlock && mm.collide)
                     camSplit = true;
         if (camSplit)
-            footCam.assign(gHeights.size(), kNone);
+            footCam.assign(gHeights.size(), -100.0f);
         // Where the model actually meets the sea. The heightfield can only
         // hold one height per cell and collision needs the top surface, so
         // an overhanging island's deck outline is not its waterline -- and
@@ -4033,9 +4026,7 @@ static void save_map(const char* path)
                                 continue;
                             const float y = a[1] * w0 + b[1] * w1 + c[1] * w2;
                             float& hh = foot[(size_t)j * HN + i];
-                            // above the water, and the lowest such: a deck
-                            // under a branch beats the branch
-                            if (y >= seaY && y < hh)
+                            if (y > hh)
                                 hh = y;
                             float& lo = footLow[(size_t)j * HN + i];
                             if (y < lo)
@@ -4055,7 +4046,7 @@ static void save_map(const char* path)
                             if (i < 0 || j < 0 || i >= HN || j >= HN)
                                 continue;
                             float& hh = foot[(size_t)j * HN + i];
-                            if (v[1] >= seaY && v[1] < hh)
+                            if (v[1] > hh)
                                 hh = v[1];
                             float& lo = footLow[(size_t)j * HN + i];
                             if (v[1] < lo)
@@ -4078,13 +4069,10 @@ static void save_map(const char* path)
                     if (dx * dx + dz * dz > r * r)
                         continue;
                     float& h = foot[(size_t)j * HN + i];
-                    if (top >= seaY && top < h)
+                    if (top > h)
                         h = top;
                 }
         }
-        for (float& v : foot)
-            if (v >= kNone * 0.5f)
-                v = -100.0f;
         // Close whatever the rasteriser still left open. Even with every
         // triangle recorded, a cell can end up empty where faces meet at an
         // angle, and a single empty cell in the middle of a surface is a
@@ -4098,13 +4086,12 @@ static void save_map(const char* path)
                     const size_t k = (size_t)j * HN + i;
                     if (prev[k] > -50.0f)
                         continue;
-                    float best = 1e9f;
+                    float best = -100.0f;
                     int n = 0;
                     for (int dj = -1; dj <= 1; dj++)
                         for (int di = -1; di <= 1; di++) {
                             const float v = prev[(size_t)(j + dj) * HN + i + di];
-                            // lowest, to match how the surface is chosen
-                            if (v > -50.0f) { n++; best = SDL_min(best, v); }
+                            if (v > -50.0f) { n++; best = SDL_max(best, v); }
                         }
                     // five of eight neighbours means this is inside the
                     // surface, not along its edge
