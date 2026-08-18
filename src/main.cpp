@@ -7615,6 +7615,18 @@ int main(int argc, char** argv)
                         SDL_ShowOpenFileDialog(map_dialog_cb, (void*)21, win,
                                                kProjFilters, 1, nullptr,
                                                false);
+                    // Still needed: a project holds a whole chart, but a
+                    // single cell lives in a .wmap and every map made
+                    // before projects existed is one. Removing these left
+                    // no way at all to open them.
+                    if (ImGui::Button("Export Map..."))
+                        SDL_ShowSaveFileDialog(map_dialog_cb, (void*)1, win,
+                                               kMapFilters, 1, nullptr);
+                    ImGui::SameLine();
+                    if (ImGui::Button("Import Map..."))
+                        SDL_ShowOpenFileDialog(map_dialog_cb, (void*)2, win,
+                                               kMapFilters, 1, nullptr,
+                                               false);
                     ImGui::TextWrapped("One file for the whole chart: every "
                                        "cell's terrain, paint layers, grass, "
                                        "props and their settings, plus the "
