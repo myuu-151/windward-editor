@@ -3273,7 +3273,24 @@ static bool import_blend(const std::string& path)
         return false;
     }
     const std::string base = SDL_GetBasePath();
-    const std::string out = base + "blend_import.glb";
+    // Named after the .blend it came from. Converting every file to one
+    // fixed name meant every import arrived as the same entry, so bringing
+    // in a second model replaced the first instead of joining it.
+    std::string stem = path;
+    {
+        size_t sl = stem.find_last_of("/\\");
+        if (sl != std::string::npos)
+            stem = stem.substr(sl + 1);
+        size_t dot = stem.find_last_of('.');
+        if (dot != std::string::npos)
+            stem = stem.substr(0, dot);
+        for (char& c : stem)
+            if (!isalnum((unsigned char)c) && c != '_' && c != '-')
+                c = '_';
+        if (stem.empty())
+            stem = "blend_import";
+    }
+    const std::string out = base + stem + ".glb";
     const std::string script = base + "blend_import.py";
     // Written to a file rather than passed as --python-expr: the quoting
     // does not survive a command line, and this needs real code.
@@ -4670,6 +4687,128 @@ static bool load_project(const std::string& path)
     return true;
 }
 
+// --------------------------------------------------------------- populate
+// Dress the generated terrain from the prop library. What makes an island
+// read as somewhere rather than as a shape is what stands on it, and the
+// library already holds the pieces -- so this is rules, not modelling:
+// where a thing belongs, how densely, and how it clumps.
+static int find_mesh(const char* category, const char* contains, int nth)
+{
+    int seen = 0;
+    for (int i = 0; i < (int)gPropMeshes.size(); i++) {
+        const PropMesh& pm = gPropMeshes[i];
+        if (pm.category != category)
+            continue;
+        if (contains && pm.label.find(contains) == std::string::npos)
+            continue;
+        if (seen++ == nth)
+            return i;
+    }
+    return -1;
+}
+
+// slope as a fraction: 0 flat, 1 is a 45-degree face
+static float slope_at(float x, float z)
+{
+    const float d = 0.9f;
+    const float hx = height_at(x + d, z) - height_at(x - d, z);
+    const float hz = height_at(x, z + d) - height_at(x, z - d);
+    return sqrtf(hx * hx + hz * hz) / (2.0f * d);
+}
+
+static void populate_island(unsigned seed)
+{
+    std::vector<int> trees, rocks, bushes, grass;
+    for (int n = 0; n < 6; n++) {
+        int m = find_mesh("Trees", "BirchTree", n);
+        if (m >= 0) trees.push_back(m);
+        m = find_mesh("Rocks", "Boulder", n);
+        if (m >= 0) rocks.push_back(m);
+        m = find_mesh("Foliage", "Bush", n);
+        if (m >= 0) bushes.push_back(m);
+        m = find_mesh("Foliage", "Fern", n);
+        if (m >= 0) grass.push_back(m);
+    }
+    if (trees.empty() && rocks.empty())
+        return;
+    unsigned st = seed * 1664525u + 1013904223u;
+    auto rnd = [&st]() {
+        st = st * 1664525u + 1013904223u;
+        return (float)((st >> 8) & 0xFFFF) / 65535.0f;
+    };
+    const float half = TER_HALF - 1.5f;
+    int placed = 0;
+
+    // Trees in clumps rather than sprinkled: a scatter that is even reads as
+    // noise, while a few groves with clear ground between them reads as a
+    // wood. Each clump picks a spot that suits it, then crowds around it.
+    for (int c = 0; c < 26 && !trees.empty(); c++) {
+        const float cx = (rnd() * 2.0f - 1.0f) * half;
+        const float cz = (rnd() * 2.0f - 1.0f) * half;
+        const float ch = height_at(cx, cz);
+        if (ch < gWaterline + 1.2f || slope_at(cx, cz) > 0.35f)
+            continue;
+        const int n = 3 + (int)(rnd() * 6.0f);
+        const float spread = 2.5f + rnd() * 4.5f;
+        for (int i = 0; i < n; i++) {
+            const float a = rnd() * 6.2831853f;
+            const float r = spread * sqrtf(rnd());
+            const float x = cx + cosf(a) * r, z = cz + sinf(a) * r;
+            if (fabsf(x) > half || fabsf(z) > half)
+                continue;
+            const float h = height_at(x, z);
+            if (h < gWaterline + 1.0f || slope_at(x, z) > 0.45f)
+                continue;
+            gProps.push_back({ trees[(int)(rnd() * trees.size()) % trees.size()],
+                               x, h, z, rnd() * 6.2831853f,
+                               0.35f + rnd() * 0.25f });
+            placed++;
+        }
+    }
+
+    // Boulders where the ground is steep, and along the tide line, which is
+    // where they collect in life.
+    for (int i = 0; i < 260 && !rocks.empty(); i++) {
+        const float x = (rnd() * 2.0f - 1.0f) * half;
+        const float z = (rnd() * 2.0f - 1.0f) * half;
+        const float h = height_at(x, z);
+        const float sl = slope_at(x, z);
+        const bool shore = h > gWaterline - 0.3f && h < gWaterline + 1.4f;
+        if (h < gWaterline - 0.5f)
+            continue;
+        if (!(sl > 0.5f || (shore && rnd() < 0.5f)))
+            continue;
+        // The library's boulders are big: at anything near unit scale they
+        // stand taller than the trees and the island reads as a quarry.
+        gProps.push_back({ rocks[(int)(rnd() * rocks.size()) % rocks.size()],
+                           x, h, z, rnd() * 6.2831853f,
+                           0.10f + rnd() * 0.22f });
+        placed++;
+    }
+
+    // Undergrowth over the open ground, thinning on slopes.
+    for (int i = 0; i < 900; i++) {
+        const std::vector<int>& set = (i % 3 == 0) ? bushes : grass;
+        if (set.empty())
+            continue;
+        const float x = (rnd() * 2.0f - 1.0f) * half;
+        const float z = (rnd() * 2.0f - 1.0f) * half;
+        const float h = height_at(x, z);
+        const float sl = slope_at(x, z);
+        if (h < gWaterline + 0.8f || sl > 0.6f)
+            continue;
+        if (rnd() < sl * 1.2f)
+            continue;
+        gProps.push_back({ set[(int)(rnd() * set.size()) % set.size()],
+                           x, h, z, rnd() * 6.2831853f,
+                           0.25f + rnd() * 0.25f });
+        placed++;
+    }
+    SDL_Log("populate: %d props (%d tree kinds, %d rock, %d bush, %d grass)",
+            placed, (int)trees.size(), (int)rocks.size(), (int)bushes.size(),
+            (int)grass.size());
+}
+
 // stamp the demo diorama for --shot: a wobbly two-rut path plus a low hill
 static void stamp_demo_scene()
 {
@@ -5481,12 +5620,16 @@ int main(int argc, char** argv)
         gGenMask = gMask; gGenMask2 = gMask2; gGenKill = gKill;
         gGen.on = true;
         apply_generator(gWaterline);
+        populate_island(gGen.seed);
         simTime = 7.0;
-        yaw = 0.0f;
-        pitch = -1.45f;            // very nearly straight down
+        // Three quarters down and off to one side, not straight above: from
+        // directly overhead an island is a map, and what is being judged
+        // here is whether it looks like somewhere.
+        yaw = 0.0f;               // facing -Z, so stand off to +Z
+        pitch = -0.55f;
         camPos[0] = 0.0f;
-        camPos[1] = TER_HALF * 2.05f + gGen.height * 1.6f;
-        camPos[2] = 0.6f;
+        camPos[1] = TER_HALF * 1.15f + gGen.height * 1.1f;
+        camPos[2] = TER_HALF * 2.9f;
     } else if (shotPath) {
         stamp_demo_scene();
         simTime = 7.0;
