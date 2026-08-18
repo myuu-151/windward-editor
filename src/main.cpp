@@ -5877,6 +5877,59 @@ int main(int argc, char** argv)
                     hasHit = true;
                 }
             }
+            // ...and onto whatever is already standing there. A quadrant
+            // built out of props has no ground, so without this the cursor
+            // only ever met the sea and a house could not be put on the
+            // island it belongs on. Nearest triangle along the ray wins.
+            {
+                float best = 1e9f;
+                for (const PropInst& pi : gProps) {
+                    const PropMesh& pm = gPropMeshes[pi.mesh];
+                    if (!pm.loaded || pm.pts.empty())
+                        continue;
+                    const float cs = cosf(pi.yaw), sn = sinf(pi.yaw);
+                    auto place = [&](size_t v, float* o) {
+                        const float lx = pm.pts[v] * pi.scale;
+                        const float ly = pm.pts[v + 1] * pi.scale;
+                        const float lz = pm.pts[v + 2] * pi.scale;
+                        o[0] = pi.x + lx * cs + lz * sn;
+                        o[1] = pi.y + ly;
+                        o[2] = pi.z - lx * sn + lz * cs;
+                    };
+                    for (size_t t = 0; t + 8 < pm.pts.size(); t += 9) {
+                        float A[3], B[3], C[3];
+                        place(t, A); place(t + 3, B); place(t + 6, C);
+                        const float e1[3] = { B[0]-A[0], B[1]-A[1], B[2]-A[2] };
+                        const float e2[3] = { C[0]-A[0], C[1]-A[1], C[2]-A[2] };
+                        const float pv[3] = { rd[1]*e2[2]-rd[2]*e2[1],
+                                              rd[2]*e2[0]-rd[0]*e2[2],
+                                              rd[0]*e2[1]-rd[1]*e2[0] };
+                        const float det = e1[0]*pv[0]+e1[1]*pv[1]+e1[2]*pv[2];
+                        if (fabsf(det) < 1e-8f)
+                            continue;
+                        const float inv = 1.0f / det;
+                        const float tv[3] = { camPos[0]-A[0], camPos[1]-A[1],
+                                              camPos[2]-A[2] };
+                        const float u = (tv[0]*pv[0]+tv[1]*pv[1]+tv[2]*pv[2]) * inv;
+                        if (u < 0.0f || u > 1.0f)
+                            continue;
+                        const float qv[3] = { tv[1]*e1[2]-tv[2]*e1[1],
+                                              tv[2]*e1[0]-tv[0]*e1[2],
+                                              tv[0]*e1[1]-tv[1]*e1[0] };
+                        const float vv = (rd[0]*qv[0]+rd[1]*qv[1]+rd[2]*qv[2]) * inv;
+                        if (vv < 0.0f || u + vv > 1.0f)
+                            continue;
+                        const float tt = (e2[0]*qv[0]+e2[1]*qv[1]+e2[2]*qv[2]) * inv;
+                        if (tt > 0.01f && tt < best) {
+                            best = tt;
+                            hit[0] = camPos[0] + rd[0] * tt;
+                            hit[1] = camPos[1] + rd[1] * tt;
+                            hit[2] = camPos[2] + rd[2] * tt;
+                            hasHit = true;
+                        }
+                    }
+                }
+            }
             if (ImGui::GetIO().WantCaptureMouse)
                 hasHit = false;   // cursor over the panel: never paint through
             bool painting = hasHit && (mb & SDL_BUTTON_LMASK) && !shotPath;
