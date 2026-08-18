@@ -5456,6 +5456,9 @@ int main(int argc, char** argv)
     int propTool = 0;           // 0 place, 1 scatter, 2 erase, 3 select
     int propCat = 0, propSel = -1, selInst = -1;
     float propScale = 1.0f, propScaleRand = 0.35f, propYawFixed = 0.0f;
+    // Height offset applied to whatever goes down next, so a thing can be
+    // set on a roof or sunk into a slope without moving it afterwards.
+    float placeLift = 0.0f;
     float propDensity = 2.0f, propSpacing = 2.0f;
     bool propRandomYaw = true;
     unsigned propRng = 777u;
@@ -5988,9 +5991,9 @@ int main(int argc, char** argv)
                     float sc = propScale *
                         (1.0f + (pRand() - 0.5f) * 2.0f * propScaleRand);
                     gProps.push_back({ propSel, hit[0],
-                                       gShowGround
-                                           ? height_at(hit[0], hit[2])
-                                           : hit[1],
+                                       (gShowGround
+                                            ? height_at(hit[0], hit[2])
+                                            : hit[1]) + placeLift,
                                        hit[2], yaw, sc });
                     selInst = (int)gProps.size() - 1;
                 } else if (propTool == 1 && painting && propSel >= 0 &&
@@ -6019,8 +6022,9 @@ int main(int argc, char** argv)
                         float sc = propScale *
                             (1.0f + (pRand() - 0.5f) * 2.0f * propScaleRand);
                         gProps.push_back({ propSel, px,
-                                           gShowGround ? height_at(px, pz)
-                                                       : gWaterline,
+                                           (gShowGround ? height_at(px, pz)
+                                                        : gWaterline) +
+                                               placeLift,
                                            pz, pRand() * 6.2831853f, sc });
                     }
                 } else if (propTool == 2 && painting) {
@@ -7218,7 +7222,9 @@ int main(int argc, char** argv)
                     if (propTool == 0) {
                         ImGui::TextWrapped("Click the ground to place the "
                                            "selected prop.");
-                        ImGui::SliderFloat("Scale", &propScale, 0.2f, 3.0f, "%.2f");
+                        ImGui::SliderFloat("Scale", &propScale, 0.05f, 10.0f, "%.2f");
+                        ImGui::DragFloat("Place height", &placeLift, 0.05f);
+                        ImGui::TextDisabled("lifts what you place next");
                         ImGui::SliderFloat("Scale Random", &propScaleRand,
                                            0.0f, 1.0f, "%.2f");
                         ImGui::Checkbox("Random Rotation", &propRandomYaw);
@@ -7232,7 +7238,9 @@ int main(int argc, char** argv)
                                            0.2f, 10.0f, "%.1f");
                         ImGui::SliderFloat("Spacing", &propSpacing,
                                            0.3f, 8.0f, "%.1f");
-                        ImGui::SliderFloat("Scale", &propScale, 0.2f, 3.0f, "%.2f");
+                        ImGui::SliderFloat("Scale", &propScale, 0.05f, 10.0f, "%.2f");
+                        ImGui::DragFloat("Place height", &placeLift, 0.05f);
+                        ImGui::TextDisabled("lifts what you place next");
                         ImGui::SliderFloat("Scale Random", &propScaleRand,
                                            0.0f, 1.0f, "%.2f");
                         ImGui::SliderFloat("Brush Size", &brushRadius,
@@ -7249,12 +7257,21 @@ int main(int argc, char** argv)
                         ImGui::SliderAngle("Rotation##sel", &si.yaw,
                                            0.0f, 360.0f);
                         ImGui::SliderFloat("Scale##sel", &si.scale,
-                                           0.2f, 3.0f, "%.2f");
+                                           0.05f, 10.0f, "%.2f");
+                        ImGui::DragFloat("Height##sel", &si.y, 0.05f);
+                        if (ImGui::SmallButton("Drop to surface")) {
+                            const float g = height_at(si.x, si.z);
+                            if (g > -50.0f)
+                                si.y = g;
+                        }
                         float pos[2] = { si.x, si.z };
                         if (ImGui::DragFloat2("Position", pos, 0.05f)) {
-                            si.x = SDL_clamp(pos[0], -TER_HALF, TER_HALF);
-                            si.z = SDL_clamp(pos[1], -TER_HALF, TER_HALF);
-                            si.y = height_at(si.x, si.z);
+                            si.x = SDL_clamp(pos[0], -gCellHalf, gCellHalf);
+                            si.z = SDL_clamp(pos[1], -gCellHalf, gCellHalf);
+                            // Height is its own control now. Recomputing it
+                            // here read the footprint, and open water in
+                            // that field is -100 -- so nudging a prop off
+                            // the island dropped it out of the world.
                         }
                         if (ImGui::Button("Delete")) {
                             push_undo();
