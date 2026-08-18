@@ -4401,9 +4401,12 @@ static bool load_map(const char* path)
     // brings its terrain with it; a quadrant built out of props has no
     // land above the water and gets none drawn, no sculpt tools and
     // nothing under the cursor but the sea.
-    gShowGround = false;
-    for (float h : gHeights)
-        if (h > gWaterline + 0.05f) { gShowGround = true; break; }
+    // The file says which it is -- magic '9' is a props-only quadrant.
+    // Guessing from the heights used to work, but a props-only map now
+    // bakes the model's own footprint into them, and that footprint sits
+    // above the water, so the guess said "has terrain" and drew a plane
+    // across the island.
+    gShowGround = magic[7] != '9';
     SDL_Log("loaded %s (%s)", path,
             gShowGround ? "has terrain" : "props only");
     return true;
