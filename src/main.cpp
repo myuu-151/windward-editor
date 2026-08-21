@@ -769,6 +769,50 @@ void main() {
 
 // ------------------------------------------------------------------ gl utils
 
+// A teleport reads as a swirling disc lying on the ground, not a piece of
+// architecture. Procedural, so it costs one quad and no texture: polar
+// coordinates, a few arms wound by a log spiral, turning over time.
+static const char* kPortalVS = R"(#version 330 core
+layout(location=0) in vec2 aPos;         // unit quad, -1..1
+uniform mat4 uMvp;
+uniform vec3 uCenter;
+uniform float uRadius;
+out vec2 vUv;
+void main(){
+    vUv = aPos;
+    vec3 w = uCenter + vec3(aPos.x * uRadius, 0.0, aPos.y * uRadius);
+    gl_Position = uMvp * vec4(w, 1.0);
+}
+)";
+
+static const char* kPortalFS = R"(#version 330 core
+in vec2 vUv;
+uniform float uTime;
+uniform float uSel;
+out vec4 frag;
+void main(){
+    float r = length(vUv);
+    if (r > 1.0) discard;
+    float a = atan(vUv.y, vUv.x);
+    // log spiral: arms tighten toward the middle instead of fanning out
+    float wind = log(max(r, 0.04)) * 3.2;
+    float arms = 3.0;
+    float s = sin(arms * (a + wind) - uTime * 2.6);
+    float band = smoothstep(0.1, 0.95, s);
+    float core = smoothstep(1.0, 0.05, r);         // bright in the middle
+    float rim  = smoothstep(1.0, 0.82, r);         // soft outer edge
+    float pulse = 0.85 + 0.15 * sin(uTime * 3.0);
+    vec3 deep = vec3(0.10, 0.30, 0.95);
+    vec3 hot  = vec3(0.70, 0.95, 1.00);
+    vec3 col = mix(deep, hot, band * core) * pulse * uSel;
+    col += hot * pow(core, 6.0) * 0.9;             // glowing throat
+    float alpha = (0.20 + band * 0.70) * core * rim;
+    frag = vec4(col, alpha);
+}
+)";
+
+static GLuint gPortalProg = 0, gPortalVao = 0, gPortalVbo = 0;
+
 static GLuint compile(GLenum type, const char* src)
 {
     GLuint sh = glCreateShader(type);
@@ -959,6 +1003,20 @@ struct PropInst {
     float x, y, z, yaw, scale;
 };
 static std::vector<PropInst> gProps;
+
+// A teleport marker. The client reads these out of the map and sends the
+// player into a generated dungeon when he steps on one. Kept apart from
+// gProps because a portal is map data, not geometry -- it carries a seed
+// and a radius, and it must survive a prop being erased under it.
+struct PortalInst {
+    float x = 0, y = 0, z = 0;
+    float yaw = 0;
+    float radius = 3.0f;   // how close the player has to get
+    Uint32 seed = 0;       // 0 = a fresh dungeon on every entry
+};
+static std::vector<PortalInst> gPortals;
+static int gPortalSel = -1;
+
 static float gWaterline = -3.0f;   // sea level, world units
 // A quadrant can hold nothing but props -- a level built entirely out of
 // imported geometry wants no ground plane under it at all, and a flat
@@ -4266,6 +4324,19 @@ static void save_map(const char* path)
         fwrite("CELLSZ01", 1, 8, f);
         fwrite(&gCellHalf, sizeof(float), 1, f);
     }
+    if (!gPortals.empty()) {
+        fwrite("PORTAL01", 1, 8, f);
+        Uint32 pn = (Uint32)gPortals.size();
+        fwrite(&pn, 4, 1, f);
+        for (const PortalInst& p : gPortals) {
+            fwrite(&p.x, sizeof(float), 1, f);
+            fwrite(&p.y, sizeof(float), 1, f);
+            fwrite(&p.z, sizeof(float), 1, f);
+            fwrite(&p.yaw, sizeof(float), 1, f);
+            fwrite(&p.radius, sizeof(float), 1, f);
+            fwrite(&p.seed, 4, 1, f);
+        }
+    }
     if (!gCamFoot.empty()) {
         fwrite("CAMBLK01", 1, 8, f);
         Uint32 cn = (Uint32)gCamFoot.size();
@@ -4393,6 +4464,39 @@ static bool load_map(const char* path)
                     fseek(f, tsz - take, SEEK_CUR);
                 gLoadedTune = true;
             }
+        }
+    }
+    // Trailing tagged sections. The editor only ever wrote these; reading
+    // them back is what makes a portal survive a reload. Unknown tags rewind
+    // and stop, so a map written by a newer build still loads here.
+    gPortals.clear();
+    gPortalSel = -1;
+    for (;;) {
+        char tag[8];
+        long at = ftell(f);
+        if (fread(tag, 1, 8, f) != 8)
+            break;
+        if (memcmp(tag, "PORTAL01", 8) == 0) {
+            Uint32 pn = 0;
+            if (fread(&pn, 4, 1, f) != 1)
+                break;
+            for (Uint32 i = 0; i < pn; i++) {
+                PortalInst p;
+                if (fread(&p.x, sizeof(float), 1, f) != 1) break;
+                if (fread(&p.y, sizeof(float), 1, f) != 1) break;
+                if (fread(&p.z, sizeof(float), 1, f) != 1) break;
+                if (fread(&p.yaw, sizeof(float), 1, f) != 1) break;
+                if (fread(&p.radius, sizeof(float), 1, f) != 1) break;
+                if (fread(&p.seed, 4, 1, f) != 1) break;
+                gPortals.push_back(p);
+            }
+        } else if (memcmp(tag, "CELLSZ01", 8) == 0) {
+            float h = 0;
+            if (fread(&h, sizeof(float), 1, f) == 1)
+                gCellHalf = h;
+        } else {
+            fseek(f, at, SEEK_SET);   // not ours -- leave it alone
+            break;
         }
     }
     fclose(f);
@@ -4901,6 +5005,21 @@ int main(int argc, char** argv)
     GLuint terProg = make_program(TER_VS, TER_FS);
     GLuint grassProg = make_program(GRASS_VS, GRASS_FS);
     GLuint skyProg = make_program(SKY_VS, SKY_FS);
+    // portal disc: one unit quad, scaled per instance by the portal radius
+    gPortalProg = make_program(kPortalVS, kPortalFS);
+    {
+        const float quad[12] = { -1, -1,  1, -1,  1, 1,
+                                 -1, -1,  1,  1, -1, 1 };
+        glGenVertexArrays(1, &gPortalVao);
+        glGenBuffers(1, &gPortalVbo);
+        glBindVertexArray(gPortalVao);
+        glBindBuffer(GL_ARRAY_BUFFER, gPortalVbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof quad, quad, GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float),
+                              (void*)0);
+        glBindVertexArray(0);
+    }
     GLuint propProg = make_program(PROP_VS, PROP_FS);
     GLuint depthTerProg = make_program(TER_VS, DEPTH_FS);
     GLuint depthPropProg = make_program(PROP_VS, DEPTH_PROP_FS);
@@ -5454,6 +5573,8 @@ int main(int argc, char** argv)
     int activeTab = 0;          // 0 sculpt, 1 paint, 2 details, 3 props
     int sculptTool = 0, paintLayer = 0, detailTool = 0;
     int propTool = 0;           // 0 place, 1 scatter, 2 erase, 3 select
+    int portalTool = 0;         // 0 place/select, 1 erase
+    int portalSeed = 0;         // 0 = a fresh dungeon on every entry
     int propCat = 0, propSel = -1, selInst = -1;
     float propScale = 1.0f, propScaleRand = 0.35f, propYawFixed = 0.0f;
     // Height offset applied to whatever goes down next, so a thing can be
@@ -6057,6 +6178,38 @@ int main(int argc, char** argv)
                     }
                 }
             }
+            // Portals ride the same cursor raycast the props use, so one
+            // click drops a teleport wherever the ground already is.
+            if (activeTab == 6 && hasHit && clickEdge) {
+                int pick = -1;
+                float best = 1e9f;
+                for (int i = 0; i < (int)gPortals.size(); i++) {
+                    float dx = gPortals[i].x - hit[0];
+                    float dz = gPortals[i].z - hit[2];
+                    float d2 = dx * dx + dz * dz;
+                    float r = SDL_max(2.0f, gPortals[i].radius);
+                    if (d2 < r * r && d2 < best) {
+                        best = d2;
+                        pick = i;
+                    }
+                }
+                if (portalTool == 0) {
+                    if (pick >= 0) {
+                        gPortalSel = pick;   // clicking one selects it
+                    } else {
+                        PortalInst p;
+                        p.x = SDL_clamp(hit[0], -gCellHalf, gCellHalf);
+                        p.y = hit[1];
+                        p.z = SDL_clamp(hit[2], -gCellHalf, gCellHalf);
+                        p.seed = (Uint32)portalSeed;
+                        gPortals.push_back(p);
+                        gPortalSel = (int)gPortals.size() - 1;
+                    }
+                } else if (portalTool == 1 && pick >= 0) {
+                    gPortals.erase(gPortals.begin() + pick);
+                    gPortalSel = -1;
+                }
+            }
             // A stroke that pushed land into the rim has nowhere left to
             // go, so grow the canvas around it: same sculpt, same scale,
             // more ground to keep pushing into.
@@ -6441,6 +6594,37 @@ int main(int argc, char** argv)
             glBindVertexArray(grassVao);
             if (gShowGround)
                 glDrawArraysInstanced(GL_TRIANGLES, 0, 12, instCount);
+        }
+
+        // Portals. Drawn after the grass so blades behind one do not paint
+        // over it -- additive and depth-write off, which means it needs to
+        // come last among the things that sit on the ground.
+        if (!gPortals.empty() && gPortalProg) {
+            glUseProgram(gPortalProg);
+            glUniformMatrix4fv(glGetUniformLocation(gPortalProg, "uMvp"), 1,
+                               GL_FALSE, mvp.m);
+            glUniform1f(glGetUniformLocation(gPortalProg, "uTime"),
+                        (float)simTime);
+            GLint locC = glGetUniformLocation(gPortalProg, "uCenter");
+            GLint locR = glGetUniformLocation(gPortalProg, "uRadius");
+            GLint locS = glGetUniformLocation(gPortalProg, "uSel");
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE);   // additive: it glows
+            glDepthMask(GL_FALSE);
+            glDisable(GL_CULL_FACE);
+            glBindVertexArray(gPortalVao);
+            for (int i = 0; i < (int)gPortals.size(); i++) {
+                const PortalInst& p = gPortals[i];
+                // lift a hair so it does not z-fight the ground it lies on
+                glUniform3f(locC, p.x, p.y + 0.05f, p.z);
+                glUniform1f(locR, p.radius);
+                glUniform1f(locS,
+                            (i == gPortalSel && activeTab == 6) ? 1.6f : 1.0f);
+                glDrawArrays(GL_TRIANGLES, 0, 6);
+            }
+            glDepthMask(GL_TRUE);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glEnable(GL_CULL_FACE);
         }
 
         // sky fills the rest
@@ -7708,6 +7892,65 @@ int main(int argc, char** argv)
                                            1.0f, 2.5f, "%.1f"))
                         applyUiScale();
                     ImGui::TextDisabled("RMB look  WASD/QE fly  [ ] size");
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("Portal")) {
+                    activeTab = 6;
+                    ImGui::TextWrapped(
+                        "Click the ground to drop a teleport. Stepping on "
+                        "one in the client sends the player into a "
+                        "generated dungeon.");
+                    ImGui::RadioButton("Place / Select", &portalTool, 0);
+                    ImGui::SameLine();
+                    ImGui::RadioButton("Erase", &portalTool, 1);
+
+                    ImGui::SeparatorText("New portal");
+                    ImGui::InputInt("Seed", &portalSeed);
+                    if (portalSeed < 0)
+                        portalSeed = 0;
+                    ImGui::TextDisabled(
+                        portalSeed == 0
+                            ? "0 = a different dungeon every entry"
+                            : "fixed seed = the same dungeon every time");
+
+                    ImGui::SeparatorText("Placed");
+                    ImGui::Text("%d portal%s", (int)gPortals.size(),
+                                gPortals.size() == 1 ? "" : "s");
+                    for (int i = 0; i < (int)gPortals.size(); i++) {
+                        char lbl[64];
+                        SDL_snprintf(lbl, sizeof lbl, "portal %d##pt%d", i, i);
+                        if (ImGui::Selectable(lbl, gPortalSel == i))
+                            gPortalSel = i;
+                    }
+                    if (gPortalSel >= 0 && gPortalSel < (int)gPortals.size()) {
+                        PortalInst& p = gPortals[gPortalSel];
+                        ImGui::SeparatorText("Selected");
+                        float pos[3] = { p.x, p.y, p.z };
+                        if (ImGui::DragFloat3("Position", pos, 0.05f)) {
+                            p.x = SDL_clamp(pos[0], -gCellHalf, gCellHalf);
+                            p.y = pos[1];
+                            p.z = SDL_clamp(pos[2], -gCellHalf, gCellHalf);
+                        }
+                        ImGui::SliderAngle("Facing", &p.yaw, -180.0f, 180.0f);
+                        if (ImGui::DragFloat("Size", &p.radius, 0.05f,
+                                             0.5f, 40.0f))
+                            p.radius = SDL_clamp(p.radius, 0.5f, 40.0f);
+                        ImGui::TextDisabled(
+                            "the disc you see is the trigger area");
+                        int s = (int)p.seed;
+                        if (ImGui::InputInt("Seed##sel", &s))
+                            p.seed = (Uint32)SDL_max(0, s);
+                        if (ImGui::Button("Drop to surface")) {
+                            const float g = height_at(p.x, p.z);
+                            if (g > -50.0f)
+                                p.y = g;
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Delete")) {
+                            gPortals.erase(gPortals.begin() + gPortalSel);
+                            gPortalSel = -1;
+                        }
+                    }
                     ImGui::EndTabItem();
                 }
                 ImGui::EndTabBar();
